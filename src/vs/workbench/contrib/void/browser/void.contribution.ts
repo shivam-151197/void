@@ -19,7 +19,7 @@ import './quickEditActions.js'
 import './autocompleteService.js'
 
 // register Context services
-// import './contextGatheringService.js'
+import './contextGatheringService.js'
 // import './contextUserChangesService.js'
 
 // settings pane
@@ -63,6 +63,10 @@ import './fileService.js'
 
 // register source control management
 import './voidSCMService.js'
+
+// register embedding provider
+import './voidEmbeddingProvider.js'
+import './voidAiSearchProvider.js'
 
 // ---------- common (unclear if these actually need to be imported, because they're already imported wherever they're used) ----------
 

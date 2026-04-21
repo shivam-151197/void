@@ -511,7 +511,7 @@ const VoidOnboardingContent = () => {
 
 	const providerNamesOfWantToUseOption: { [wantToUseOption in WantToUseOption]: ProviderName[] } = {
 		smart: ['anthropic', 'openAI', 'gemini', 'openRouter'],
-		private: ['ollama', 'vLLM', 'openAICompatible', 'lmStudio'],
+		private: ['ollama', 'vLLM', 'openAICompatible', 'lmStudio', 'localProxy'],
 		cheap: ['gemini', 'deepseek', 'openRouter', 'ollama', 'vLLM'],
 		all: providerNames,
 	}

@@ -65,6 +65,10 @@ export const defaultProviderSettings = {
 		region: 'us-east-1', // add region setting
 		endpoint: '', // optionally allow overriding default
 	},
+	localProxy: {
+		endpoint: 'http://localhost:3001/v1',
+	},
+
 
 } as const
 
@@ -153,6 +157,8 @@ export const defaultModelsOfProvider = {
 	microsoftAzure: [],
 	awsBedrock: [],
 	liteLLM: [],
+	localProxy: [], // autodetected
+
 
 
 } as const satisfies Record<ProviderName, string[]>
@@ -1474,7 +1480,9 @@ const modelSettingsOfProvider: { [providerName in ProviderName]: VoidStaticProvi
 	googleVertex: googleVertexSettings,
 	microsoftAzure: microsoftAzureSettings,
 	awsBedrock: awsBedrockSettings,
+	localProxy: openaiCompatible,
 } as const
+
 
 
 // ---------------- exports ----------------

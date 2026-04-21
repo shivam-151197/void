@@ -16,7 +16,7 @@ type UnionOfKeys<T> = T extends T ? keyof T : never;
 export type ProviderName = keyof typeof defaultProviderSettings
 export const providerNames = Object.keys(defaultProviderSettings) as ProviderName[]
 
-export const localProviderNames = ['ollama', 'vLLM', 'lmStudio'] satisfies ProviderName[] // all local names
+export const localProviderNames = ['ollama', 'vLLM', 'lmStudio', 'localProxy'] satisfies ProviderName[] // all local names
 export const nonlocalProviderNames = providerNames.filter((name) => !(localProviderNames as string[]).includes(name)) // all non-local names
 
 type CustomSettingName = UnionOfKeys<typeof defaultProviderSettings[ProviderName]>
@@ -98,7 +98,10 @@ export const displayInfoOfProviderName = (providerName: ProviderName): DisplayIn
 		return { title: 'Mistral', }
 	}
 	else if (providerName === 'googleVertex') {
-		return { title: 'Google Vertex AI', }
+		return { title: 'Vertex AI', }
+	}
+	else if (providerName === 'localProxy') {
+		return { title: 'Local Proxy', }
 	}
 	else if (providerName === 'microsoftAzure') {
 		return { title: 'Microsoft Azure OpenAI', }
@@ -107,8 +110,9 @@ export const displayInfoOfProviderName = (providerName: ProviderName): DisplayIn
 		return { title: 'AWS Bedrock', }
 	}
 
-	throw new Error(`descOfProviderName: Unknown provider name: "${providerName}"`)
+	throw new Error(`displayInfoOfProviderName: Unknown provider name: "${providerName}"`)
 }
+
 
 export const subTextMdOfProviderName = (providerName: ProviderName): string => {
 
@@ -128,6 +132,8 @@ export const subTextMdOfProviderName = (providerName: ProviderName): string => {
 	if (providerName === 'vLLM') return 'Read more about custom [Endpoints here](https://docs.vllm.ai/en/latest/getting_started/quickstart.html#openai-compatible-server).'
 	if (providerName === 'lmStudio') return 'Read more about custom [Endpoints here](https://lmstudio.ai/docs/app/api/endpoints/openai).'
 	if (providerName === 'liteLLM') return 'Read more about endpoints [here](https://docs.litellm.ai/docs/providers/openai_compatible).'
+	if (providerName === 'localProxy') return 'Connect to your local proxy server running on port 3001.'
+
 
 	throw new Error(`subTextMdOfProviderName: Unknown provider name: "${providerName}"`)
 }
@@ -166,20 +172,24 @@ export const displayInfoOfSettingName = (providerName: ProviderName, settingName
 			title: providerName === 'ollama' ? 'Endpoint' :
 				providerName === 'vLLM' ? 'Endpoint' :
 					providerName === 'lmStudio' ? 'Endpoint' :
-						providerName === 'openAICompatible' ? 'baseURL' : // (do not include /chat/completions)
-							providerName === 'googleVertex' ? 'baseURL' :
-								providerName === 'microsoftAzure' ? 'baseURL' :
-									providerName === 'liteLLM' ? 'baseURL' :
-										providerName === 'awsBedrock' ? 'Endpoint' :
-											'(never)',
+						providerName === 'localProxy' ? 'Endpoint' :
+							providerName === 'openAICompatible' ? 'baseURL' : // (do not include /chat/completions)
+
+								providerName === 'googleVertex' ? 'baseURL' :
+									providerName === 'microsoftAzure' ? 'baseURL' :
+										providerName === 'liteLLM' ? 'baseURL' :
+											providerName === 'awsBedrock' ? 'Endpoint' :
+												'(never)',
 
 			placeholder: providerName === 'ollama' ? defaultProviderSettings.ollama.endpoint
 				: providerName === 'vLLM' ? defaultProviderSettings.vLLM.endpoint
 					: providerName === 'openAICompatible' ? 'https://my-website.com/v1'
 						: providerName === 'lmStudio' ? defaultProviderSettings.lmStudio.endpoint
-							: providerName === 'liteLLM' ? 'http://localhost:4000'
-								: providerName === 'awsBedrock' ? 'http://localhost:4000/v1'
-									: '(never)',
+							: providerName === 'localProxy' ? defaultProviderSettings.localProxy.endpoint
+								: providerName === 'liteLLM' ? 'http://localhost:4000'
+
+									: providerName === 'awsBedrock' ? 'http://localhost:4000/v1'
+										: '(never)',
 
 
 		}
@@ -352,7 +362,14 @@ export const defaultSettingsOfProvider: SettingsOfProvider = {
 		...modelInfoOfDefaultModelNames(defaultModelsOfProvider.awsBedrock),
 		_didFillInProviderSettings: undefined,
 	},
+	localProxy: {
+		...defaultCustomSettings,
+		...defaultProviderSettings.localProxy,
+		...modelInfoOfDefaultModelNames(defaultModelsOfProvider.localProxy),
+		_didFillInProviderSettings: undefined,
+	},
 }
+
 
 
 export type ModelSelection = { providerName: ProviderName, modelName: string }
@@ -435,7 +452,7 @@ export const isFeatureNameDisabled = (featureName: FeatureName, settingsState: V
 
 
 
-export type ChatMode = 'agent' | 'gather' | 'normal'
+export type ChatMode = 'agent' | 'gather' | 'normal' | 'plan'
 
 
 export type GlobalSettings = {

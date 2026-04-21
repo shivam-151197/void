@@ -334,12 +334,18 @@ export async function getAllUrisInDirectory(
 		}
 
 		try {
-
-			if (!folderStat.isDirectory || !folderStat.children) {
+			if (!folderStat.isDirectory) {
 				return true;
 			}
 
-			const eChildren = await resolveChildren(folderStat.children, fileService)
+			// Child directory stats often arrive without their own children populated,
+			// so resolve the directory itself before descending to ensure deep traversal.
+			const resolvedFolderStat = folderStat.children ? folderStat : await fileService.resolve(folderStat.resource);
+			if (!resolvedFolderStat.children) {
+				return true;
+			}
+
+			const eChildren = await resolveChildren(resolvedFolderStat.children, fileService)
 
 			// Process files first (common convention to list files before directories)
 			for (const child of eChildren) {

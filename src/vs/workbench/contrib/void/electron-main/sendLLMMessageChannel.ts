@@ -8,7 +8,7 @@
 
 import { IServerChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { EventLLMMessageOnTextParams, EventLLMMessageOnErrorParams, EventLLMMessageOnFinalMessageParams, MainSendLLMMessageParams, AbortRef, SendLLMMessageParams, MainLLMMessageAbortParams, ModelListParams, EventModelListOnSuccessParams, EventModelListOnErrorParams, OllamaModelResponse, OpenaiCompatibleModelResponse, MainModelListParams, } from '../common/sendLLMMessageTypes.js';
+import { EventLLMMessageOnTextParams, EventLLMMessageOnErrorParams, EventLLMMessageOnFinalMessageParams, MainSendLLMMessageParams, AbortRef, SendLLMMessageParams, MainLLMMessageAbortParams, ModelListParams, EventModelListOnSuccessParams, EventModelListOnErrorParams, OllamaModelResponse, OpenaiCompatibleModelResponse, MainModelListParams, MainEmbeddingsParams, EmbeddingsParams, EventEmbeddingsOnSuccessParams, EventEmbeddingsOnErrorParams, } from '../common/sendLLMMessageTypes.js';
 import { sendLLMMessage } from './llmMessage/sendLLMMessage.js'
 import { IMetricsService } from '../common/metricsService.js';
 import { sendLLMMessageToProviderImplementation } from './llmMessage/sendLLMMessage.impl.js';
@@ -38,11 +38,11 @@ export class LLMMessageChannel implements IServerChannel {
 			success: new Emitter<EventModelListOnSuccessParams<OpenaiCompatibleModelResponse>>(),
 			error: new Emitter<EventModelListOnErrorParams<OpenaiCompatibleModelResponse>>(),
 		},
-	} satisfies {
-		[providerName in 'ollama' | 'openaiCompat']: {
-			success: Emitter<EventModelListOnSuccessParams<any>>,
-			error: Emitter<EventModelListOnErrorParams<any>>,
-		}
+	}
+	// embeddings
+	private readonly embeddingEmitters = {
+		success: new Emitter<EventEmbeddingsOnSuccessParams>(),
+		error: new Emitter<EventEmbeddingsOnErrorParams>(),
 	}
 
 	// stupidly, channels can't take in @IService
@@ -61,6 +61,9 @@ export class LLMMessageChannel implements IServerChannel {
 		else if (event === 'onError_list_ollama') return this.listEmitters.ollama.error.event;
 		else if (event === 'onSuccess_list_openAICompatible') return this.listEmitters.openaiCompat.success.event;
 		else if (event === 'onError_list_openAICompatible') return this.listEmitters.openaiCompat.error.event;
+		// embeddings
+		else if (event === 'onSuccess_getEmbeddings') return this.embeddingEmitters.success.event;
+		else if (event === 'onError_getEmbeddings') return this.embeddingEmitters.error.event;
 
 		else throw new Error(`Event not found: ${event}`);
 	}
@@ -79,6 +82,9 @@ export class LLMMessageChannel implements IServerChannel {
 			}
 			else if (command === 'openAICompatibleList') {
 				this._callOpenAICompatibleList(params)
+			}
+			else if (command === 'getEmbeddings') {
+				this._callGetEmbeddings(params)
 			}
 			else {
 				throw new Error(`Void sendLLM: command "${command}" not recognized.`)
@@ -147,6 +153,23 @@ export class LLMMessageChannel implements IServerChannel {
 			onError: (p) => { emitters.error.fire({ requestId, ...p }); },
 		}
 		sendLLMMessageToProviderImplementation[providerName].list(mainThreadParams)
+	}
+
+	private _callGetEmbeddings(params: MainEmbeddingsParams) {
+		const { requestId, providerName } = params
+		const emitters = this.embeddingEmitters
+		const mainThreadParams: EmbeddingsParams = {
+			...params,
+			onSuccess: (p) => { emitters.success.fire({ requestId, ...p }); },
+			onError: (p) => { emitters.error.fire({ requestId, ...p }); },
+		}
+
+		const impl = sendLLMMessageToProviderImplementation[providerName]
+		if (impl && 'getEmbeddings' in impl) {
+			(impl as any).getEmbeddings(mainThreadParams)
+		} else {
+			emitters.error.fire({ requestId, error: `Embeddings not supported for provider ${providerName}` })
+		}
 	}
 
 

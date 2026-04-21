@@ -47,8 +47,9 @@ const refreshBasedOn: { [k in RefreshableProviderName]: (keyof SettingsOfProvide
 	ollama: ['_didFillInProviderSettings', 'endpoint'],
 	vLLM: ['_didFillInProviderSettings', 'endpoint'],
 	lmStudio: ['_didFillInProviderSettings', 'endpoint'],
-	// openAICompatible: ['_didFillInProviderSettings', 'endpoint', 'apiKey'],
+	localProxy: ['_didFillInProviderSettings', 'endpoint'],
 }
+
 const REFRESH_INTERVAL = 5_000
 // const COOLDOWN_TIMEOUT = 300
 
@@ -144,7 +145,9 @@ export class RefreshModelService extends Disposable implements IRefreshModelServ
 		ollama: { state: 'init', timeoutId: null },
 		vLLM: { state: 'init', timeoutId: null },
 		lmStudio: { state: 'init', timeoutId: null },
+		localProxy: { state: 'init', timeoutId: null },
 	}
+
 
 
 	// start listening for models (and don't stop)
@@ -174,8 +177,10 @@ export class RefreshModelService extends Disposable implements IRefreshModelServ
 						if (providerName === 'ollama') return (model as OllamaModelResponse).name;
 						else if (providerName === 'vLLM') return (model as OpenaiCompatibleModelResponse).id;
 						else if (providerName === 'lmStudio') return (model as OpenaiCompatibleModelResponse).id;
-						else throw new Error('refreshMode fn: unknown provider', providerName);
+						else if (providerName === 'localProxy') return (model as OpenaiCompatibleModelResponse).id;
+						else throw new Error(`refreshMode fn: unknown provider ${providerName}`);
 					}),
+
 					{ enableProviderOnSuccess: options.enableProviderOnSuccess, hideRefresh: options.doNotFire }
 				)
 

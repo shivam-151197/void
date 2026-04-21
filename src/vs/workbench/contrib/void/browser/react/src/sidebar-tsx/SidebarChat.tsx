@@ -36,6 +36,39 @@ import { ToolApprovalTypeSwitch } from '../void-settings-tsx/Settings.js';
 import { persistentTerminalNameOfId } from '../../../terminalToolService.js';
 import { removeMCPToolNamePrefix } from '../../../../common/mcpServiceTypes.js';
 
+const extractTagBlock = (s: string, tagName: string): string | null => {
+	const match = s.match(new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'i'))
+	return match?.[1]?.trim() ?? null
+}
+
+const formatStructuredMarkdownBlock = (raw: string, heading: string): string => {
+	const trimmed = raw.trim()
+	if (!trimmed) return `# ${heading}\n`
+
+	const normalized = trimmed
+		.replace(/\r\n/g, '\n')
+		.replace(/^\s*[-*]\s+/gm, '- ')
+		.replace(/(\d+)\.\s+/g, '\n$1. ')
+		.replace(/\n{3,}/g, '\n\n')
+		.trim()
+
+	const body = normalized.startsWith('#')
+		? normalized
+		: `# ${heading}\n\n${normalized}`
+
+	return `${body.trim()}\n`
+}
+
+const renderableAssistantContent = (raw: string): string => {
+	const plan = extractTagBlock(raw, 'plan')
+	if (plan) return formatStructuredMarkdownBlock(plan, 'Implementation Plan')
+
+	const walkthrough = extractTagBlock(raw, 'walkthrough')
+	if (walkthrough) return formatStructuredMarkdownBlock(walkthrough, 'Plan Walkthrough')
+
+	return raw
+}
+
 
 
 export const IconX = ({ size, className = '', ...props }: { size: number, className?: string } & React.SVGProps<SVGSVGElement>) => {
@@ -251,12 +284,14 @@ const nameOfChatMode = {
 	'normal': 'Chat',
 	'gather': 'Gather',
 	'agent': 'Agent',
+	'plan': 'Plan',
 }
 
 const detailOfChatMode = {
 	'normal': 'Normal chat',
 	'gather': 'Reads files, but can\'t edit',
 	'agent': 'Edits files and uses tools',
+	'plan': 'Plans first, then executes steps.',
 }
 
 
@@ -266,7 +301,7 @@ const ChatModeDropdown = ({ className }: { className: string }) => {
 	const voidSettingsService = accessor.get('IVoidSettingsService')
 	const settingsState = useSettingsState()
 
-	const options: ChatMode[] = useMemo(() => ['normal', 'gather', 'agent'], [])
+	const options: ChatMode[] = useMemo(() => ['normal', 'gather', 'agent', 'plan'], [])
 
 	const onChangeOption = useCallback((newVal: ChatMode) => {
 		voidSettingsService.setGlobalSetting('chatMode', newVal)
@@ -1330,6 +1365,10 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 	const hasReasoning = !!reasoningStr
 	const isDoneReasoning = !!chatMessage.displayContent
 	const thread = chatThreadsService.getCurrentThread()
+	const assistantDisplayContent = useMemo(
+		() => renderableAssistantContent(chatMessage.displayContent || ''),
+		[chatMessage.displayContent]
+	)
 
 
 	const chatMessageLocation: ChatMessageLocation = {
@@ -1362,7 +1401,7 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 			<div className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
 				<ProseWrapper>
 					<ChatMarkdownRender
-						string={chatMessage.displayContent || ''}
+						string={assistantDisplayContent}
 						chatMessageLocation={chatMessageLocation}
 						isApplyEnabled={true}
 						isLinkDetectionEnabled={true}
@@ -2939,6 +2978,66 @@ export const SidebarChat = () => {
 
 	}, [chatThreadsService, isDisabled, isRunning, textAreaRef, textAreaFnsRef, setSelections, settingsState])
 
+	const latestAssistantMessage = useMemo(() => {
+		for (let i = previousMessages.length - 1; i >= 0; i -= 1) {
+			const message = previousMessages[i]
+			if (message.role === 'assistant') return message
+		}
+		return null
+	}, [previousMessages])
+
+	const latestAssistantText = latestAssistantMessage?.displayContent ?? ''
+	const latestAssistantHasPlan = latestAssistantText.includes('<plan>')
+	const latestAssistantHasWalkthrough = latestAssistantText.includes('<walkthrough>')
+	const isPlanMode = settingsState.globalSettings.chatMode === 'plan'
+	const showPlanWorkflowControls = isPlanMode && !isRunning && latestAssistantHasPlan && !latestAssistantHasWalkthrough
+
+	const onPlanReview = useCallback(() => {
+		const commandService = accessor.get('ICommandService')
+		const workspaceContextService = accessor.get('IWorkspaceContextService')
+		const workspaceFolder = workspaceContextService.getWorkspace().folders[0]
+		if (workspaceFolder) {
+			const planURI = URI.joinPath(workspaceFolder.uri, 'implementation_plan.md.resolved')
+			void commandService.executeCommand('vscode.open', planURI)
+		}
+
+		const feedback = (textAreaRef.current?.value || '').trim()
+		if (!feedback) return
+		const reviewMessage = `PLAN_REVIEW_FEEDBACK:
+Please revise and replace the previous <plan> based on this feedback:
+${feedback}
+
+Important:
+- Output ONLY a full replacement <plan> block.
+- Do not execute tools.
+- Remove outdated plan items and return a clean updated plan.`
+		void onSubmit(reviewMessage)
+	}, [onSubmit, textAreaRef, accessor])
+
+	const onPlanProceed = useCallback(() => {
+		const proceedMessage = `PLAN_PROCEED:
+Execute exactly ONE atomic pending task from the latest approved <plan>.
+
+Rules:
+- Use only the minimum required context from the initial request, current plan, and just-in-time project reads.
+- Do not start a second task in this turn.
+- After completion, output a <task_summary> with:
+  - task name
+  - files changed
+  - checks/verifications run
+  - remaining tasks status`
+		void onSubmit(proceedMessage)
+	}, [onSubmit])
+
+	const openPlanLifecycleFile = useCallback((relativePath: string) => {
+		const commandService = accessor.get('ICommandService')
+		const workspaceContextService = accessor.get('IWorkspaceContextService')
+		const workspaceFolder = workspaceContextService.getWorkspace().folders[0]
+		if (!workspaceFolder) return
+		const uri = URI.joinPath(workspaceFolder.uri, relativePath)
+		void commandService.executeCommand('vscode.open', uri)
+	}, [accessor])
+
 	const onAbort = async () => {
 		const threadId = currentThread.id
 		await chatThreadsService.abortRunning(threadId)
@@ -3075,6 +3174,80 @@ export const SidebarChat = () => {
 		setSelections={setSelections}
 		onClickAnywhere={() => { textAreaRef.current?.focus() }}
 	>
+		{showPlanWorkflowControls ? <div className="flex items-center gap-2 px-0.5 pb-2">
+			<button
+				type='button'
+				onClick={onPlanProceed}
+				className={`
+					px-2 py-1
+					bg-[var(--vscode-button-background)]
+					text-[var(--vscode-button-foreground)]
+					hover:bg-[var(--vscode-button-hoverBackground)]
+					rounded
+					text-sm font-medium
+				`}
+			>
+				Proceed
+			</button>
+			<button
+				type='button'
+				onClick={onPlanReview}
+				disabled={instructionsAreEmpty}
+				className={`
+					px-2 py-1
+					bg-[var(--vscode-button-secondaryBackground)]
+					text-[var(--vscode-button-secondaryForeground)]
+					hover:bg-[var(--vscode-button-secondaryHoverBackground)]
+					rounded
+					text-sm font-medium
+					${instructionsAreEmpty ? 'opacity-60 cursor-not-allowed' : ''}
+				`}
+			>
+				Review
+			</button>
+			<button
+				type='button'
+				onClick={() => openPlanLifecycleFile('implementation_plan.md.resolved')}
+				className={`
+					px-2 py-1
+					bg-[var(--vscode-button-secondaryBackground)]
+					text-[var(--vscode-button-secondaryForeground)]
+					hover:bg-[var(--vscode-button-secondaryHoverBackground)]
+					rounded
+					text-sm font-medium
+				`}
+			>
+				Plan
+			</button>
+			<button
+				type='button'
+				onClick={() => openPlanLifecycleFile('plan_task_log.md')}
+				className={`
+					px-2 py-1
+					bg-[var(--vscode-button-secondaryBackground)]
+					text-[var(--vscode-button-secondaryForeground)]
+					hover:bg-[var(--vscode-button-secondaryHoverBackground)]
+					rounded
+					text-sm font-medium
+				`}
+			>
+				Task Log
+			</button>
+			<button
+				type='button'
+				onClick={() => openPlanLifecycleFile('walkthrough.md')}
+				className={`
+					px-2 py-1
+					bg-[var(--vscode-button-secondaryBackground)]
+					text-[var(--vscode-button-secondaryForeground)]
+					hover:bg-[var(--vscode-button-secondaryHoverBackground)]
+					rounded
+					text-sm font-medium
+				`}
+			>
+				Walkthrough
+			</button>
+		</div> : null}
 		<VoidInputBox2
 			enableAtToMention
 			className={`min-h-[81px] px-0.5 py-0.5`}

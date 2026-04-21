@@ -14,6 +14,7 @@ import { ChatMode, FeatureName, ModelSelection, ProviderName } from '../common/v
 import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { ITerminalToolService } from './terminalToolService.js';
 import { IVoidModelService } from '../common/voidModelService.js';
+import { IContextGatheringService } from './contextGatheringService.js';
 import { URI } from '../../../../base/common/uri.js';
 import { EndOfLinePreference } from '../../../../editor/common/model.js';
 import { ToolName } from '../common/toolsServiceTypes.js';
@@ -36,6 +37,11 @@ type SimpleLLMMessage = {
 	role: 'assistant';
 	content: string;
 	anthropicReasoning: AnthropicReasoning[] | null;
+}
+
+const extractTagBlock = (s: string, tagName: string): string | null => {
+	const match = s.match(new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'i'))
+	return match?.[1]?.trim() ?? null
 }
 
 
@@ -541,6 +547,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
 		@IVoidModelService private readonly voidModelService: IVoidModelService,
 		@IMCPService private readonly mcpService: IMCPService,
+		@IContextGatheringService private readonly contextGatheringService: IContextGatheringService,
 	) {
 		super()
 	}
@@ -576,7 +583,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 
 	// system message
-	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined) => {
+	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined, semanticSnippets: string[] = []) => {
 		const workspaceFolders = this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath)
 
 		const openedURIs = this.modelService.getModels().filter(m => m.isAttachedToEditor()).map(m => m.uri.fsPath) || [];
@@ -593,7 +600,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const mcpTools = this.mcpService.getMCPTools()
 
 		const persistentTerminalIDs = this.terminalToolService.listPersistentTerminalIds()
-		const systemMessage = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, chatMode, mcpTools, includeXMLToolDefinitions })
+		const systemMessage = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, semanticSnippets, chatMode, mcpTools, includeXMLToolDefinitions })
 		return systemMessage
 	}
 
@@ -632,6 +639,29 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			}
 		}
 		return simpleLLMMessages
+	}
+
+	private _buildPlanTaskJournalContext(chatMessages: ChatMessage[]): string {
+		const assistantMessages = chatMessages.filter(m => m.role === 'assistant')
+		const journalLines: string[] = []
+		for (const message of assistantMessages) {
+			const summary = extractTagBlock(message.displayContent, 'task_summary')
+			if (!summary) continue
+			const taskId = extractTagBlock(summary, 'task_id') ?? `task-${journalLines.length + 1}`
+			const taskName = extractTagBlock(summary, 'task_name') ?? 'Untitled task'
+			const status = extractTagBlock(summary, 'status') ?? 'completed'
+			const shortSummary = extractTagBlock(summary, 'summary') ?? extractTagBlock(summary, 'what') ?? ''
+			const shortExplanation = extractTagBlock(summary, 'explanation') ?? extractTagBlock(summary, 'why') ?? ''
+			const files = (extractTagBlock(summary, 'files') ?? '')
+				.split('\n')
+				.map(line => line.replace(/^[-*\s`]+/, '').replace(/[`]/g, '').trim())
+				.filter(Boolean)
+			const snippetCount = (summary.match(/```[\s\S]*?```/g) ?? []).length
+			const filesStr = files.length === 0 ? '(none listed)' : files.join(', ')
+			journalLines.push(`- ${taskId}: ${taskName} [${status}] | summary: ${shortSummary || '(not provided)'} | explanation: ${shortExplanation || '(not provided)'} | snippets: ${snippetCount} | files: ${filesStr}`)
+		}
+		if (journalLines.length === 0) return ''
+		return `PLAN TASK JOURNAL (indexed for targeted edits and follow-up):\n${journalLines.join('\n')}`
 	}
 
 	prepareLLMSimpleMessages: IConvertToLLMMessageService['prepareLLMSimpleMessages'] = ({ simpleMessages, systemMessage, modelSelection, featureName }) => {
@@ -680,8 +710,21 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		} = getModelCapabilities(providerName, modelName, overridesOfModel)
 
 		const { disableSystemMessage } = this.voidSettingsService.state.globalSettings;
-		const fullSystemMessage = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat)
-		const systemMessage = disableSystemMessage ? '' : fullSystemMessage;
+
+		const lastUserMessage = [...chatMessages].reverse().find(m => m.role === 'user');
+		let semanticSnippets: string[] = [];
+		const semanticStart = Date.now();
+		if (lastUserMessage && typeof lastUserMessage.content === 'string') {
+			console.log(`[Void][prepareLLMChatMessages] starting semantic snippets lookup (mode=${chatMode}) for message length=${lastUserMessage.content.length}`);
+			semanticSnippets = await this.contextGatheringService.getSemanticSnippets(lastUserMessage.content);
+		}
+		console.log(`[Void][prepareLLMChatMessages] semantic snippets ready in ${Date.now() - semanticStart}ms (count=${semanticSnippets.length}, mode=${chatMode})`);
+
+		const systemMessageStart = Date.now();
+		const fullSystemMessage = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat, semanticSnippets)
+		console.log(`[Void][prepareLLMChatMessages] system message built in ${Date.now() - systemMessageStart}ms (mode=${chatMode}, semanticSnippets=${semanticSnippets.length})`);
+		const planJournalContext = chatMode === 'plan' ? this._buildPlanTaskJournalContext(chatMessages) : ''
+		const systemMessage = disableSystemMessage ? '' : [fullSystemMessage, planJournalContext].filter(Boolean).join('\n\n');
 
 		const modelSelectionOptions = this.voidSettingsService.state.optionsOfModelSelection['Chat'][modelSelection.providerName]?.[modelSelection.modelName]
 
@@ -702,6 +745,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			reservedOutputTokenSpace,
 			providerName,
 		})
+		console.log(`[Void][prepareLLMChatMessages] prepared ${messages.length} LLM messages (mode=${chatMode}, separateSystemMessage=${!!separateSystemMessage})`);
 		return { messages, separateSystemMessage };
 	}
 
@@ -763,6 +807,5 @@ gemini response:
 	}
 }
 */
-
 
 

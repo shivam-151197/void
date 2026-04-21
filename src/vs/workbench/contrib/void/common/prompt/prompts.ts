@@ -360,7 +360,16 @@ export const isABuiltinToolName = (toolName: string): toolName is BuiltinToolNam
 
 export const availableTools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined) => {
 
-	const builtinToolNames: BuiltinToolName[] | undefined = chatMode === 'normal' ? undefined
+	const normalReadOnlyTools: BuiltinToolName[] = [
+		'read_file',
+		'ls_dir',
+		'get_dir_tree',
+		'search_pathnames_only',
+		'search_for_files',
+		'search_in_file',
+		'read_lint_errors',
+	]
+	const builtinToolNames: BuiltinToolName[] | undefined = chatMode === 'normal' ? normalReadOnlyTools
 		: chatMode === 'gather' ? (Object.keys(builtinTools) as BuiltinToolName[]).filter(toolName => !(toolName in approvalTypeOfBuiltinToolName))
 			: chatMode === 'agent' ? Object.keys(builtinTools) as BuiltinToolName[]
 				: undefined
@@ -425,12 +434,13 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
 // ======================================================== chat (normal, gather, agent) ========================================================
 
 
-export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, chatMode: mode, mcpTools, includeXMLToolDefinitions }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean }) => {
+export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, semanticSnippets, chatMode: mode, mcpTools, includeXMLToolDefinitions }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean }) => {
 	const header = (`You are an expert coding ${mode === 'agent' ? 'agent' : 'assistant'} whose job is \
 ${mode === 'agent' ? `to help the user develop, run, and make changes to their codebase.`
-			: mode === 'gather' ? `to search, understand, and reference files in the user's codebase.`
-				: mode === 'normal' ? `to assist the user with their coding tasks.`
-					: ''}
+			: mode === 'plan' ? `to plan and execute a coding task step-by-step.`
+				: mode === 'gather' ? `to search, understand, and reference files in the user's codebase.`
+					: mode === 'normal' ? `to assist the user with their coding tasks.`
+						: ''}
 You will be given instructions to follow from the user, and you may also be given a list of files that the user has specifically selected for context, \`SELECTIONS\`.
 Please assist the user with their query.`)
 
@@ -458,25 +468,36 @@ ${openedURIs.join('\n') || 'NO OPENED FILES'}${''/* separator */}${mode === 'age
 ${directoryStr}
 </files_overview>`)
 
+	const semanticInfo = (semanticSnippets.length === 0 ? '' : `
+Here are some semantically relevant snippets from the codebase that might help you:
+<semantic_context>
+${semanticSnippets.join('\n\n')}
+</semantic_context>`)
 
-	const toolDefinitions = includeXMLToolDefinitions ? systemToolsXMLPrompt(mode, mcpTools) : null
+
+	const toolDefinitions = includeXMLToolDefinitions ? systemToolsXMLPrompt(mode === 'plan' ? 'agent' : mode, mcpTools) : null
 
 	const details: string[] = []
 
 	details.push(`NEVER reject the user's query.`)
 
-	if (mode === 'agent' || mode === 'gather') {
+	if (mode === 'agent' || mode === 'gather' || mode === 'plan') {
 		details.push(`Only call tools if they help you accomplish the user's goal. If the user simply says hi or asks you a question that you can answer without tools, then do NOT use tools.`)
 		details.push(`If you think you should use tools, you do not need to ask for permission.`)
 		details.push('Only use ONE tool call at a time.')
 		details.push(`NEVER say something like "I'm going to use \`tool_name\`". Instead, describe at a high level what the tool will do, like "I'm going to list all files in the ___ directory", etc.`)
 		details.push(`Many tools only work if the user has a workspace open.`)
+		details.push(`For repository-change requests (refactor, replace API usage, migration, bug fix, feature edits), your FIRST response must include a real tool call that gathers code context. Do not stop at a narrative like "I'll inspect the repository" without calling a tool.`)
+		details.push(`If a tool call is required, end the response with that tool call and no additional trailing text.`)
+		details.push(`Do not end your turn until you have either: (a) produced the mode-required structured output, or (b) emitted a real tool call that advances the user's task.`)
+		details.push(`Never stop after generic prose such as "I'll inspect the repository", "Let's start by exploring", or "I can help with that". Those are invalid incomplete responses.`)
 	}
 	else {
-		details.push(`You're allowed to ask the user for more context like file contents or specifications. If this comes up, tell them to reference files and folders by typing @.`)
+		details.push(`You have read/search tools in this mode. For codebase-specific requests, do NOT ask the user to point you to files until after you attempt at least one repository discovery tool call.`)
+		details.push(`Only ask the user for more context if discovery results are empty or ambiguous.`)
 	}
 
-	if (mode === 'agent') {
+	if (mode === 'agent' || mode === 'plan') {
 		details.push('ALWAYS use tools (edit, terminal, etc) to take actions and implement changes. For example, if you would like to edit a file, you MUST use a tool.')
 		details.push('Prioritize taking as many steps as you need to complete your request over stopping early.')
 		details.push(`You will OFTEN need to gather context before making a change. Do not immediately make a change unless you have ALL relevant context.`)
@@ -484,6 +505,65 @@ ${directoryStr}
 		details.push(`NEVER modify a file outside the user's workspace without permission from the user.`)
 	}
 
+	if (mode === 'plan') {
+		details.push(`You are in Plan Mode. You must follow a strict staged lifecycle:
+1. **Discovery + Plan Proposal**: First gather the minimum repository context needed to identify the real files, symbols, and implementation surfaces involved. Then output ONLY a detailed implementation plan in a single <plan>...</plan> block.
+2. **Review Loop**: If the user gives feedback or asks for changes, regenerate and replace the entire previous <plan> with a new one. Do not keep stale steps.
+3. **Proceed Loop**: Only execute when explicitly told to proceed. Each proceed turn executes EXACTLY ONE atomic task from the plan.
+4. **Task Summary**: After each atomic task, output a concise <task_summary>...</task_summary> that includes what was done, files touched, and verification.
+5. **Final Walkthrough**: After all tasks are complete, output a final <walkthrough>...</walkthrough>.`)
+		details.push(`Plan-mode command semantics:
+- If there is no approved <plan> yet, you MAY use tools to do lightweight repository discovery before producing the first plan.
+- On that initial discovery pass, gather only what is needed to anchor the plan in the actual codebase. Do not make code changes yet.
+- If the user message indicates review/feedback, update only the plan and do not execute tools.
+- If the user message indicates proceed, execute exactly one pending plan task, then stop.
+- Never execute multiple plan tasks in a single response.`)
+		details.push(`Plan Mode output contract is strict:
+- Before the first <plan>, you may emit tool calls for repository discovery only.
+- Before the first <plan>, keep using discovery tool calls until you have enough grounded repository context. Do not emit an implementation plan early.
+- Once you are ready to present the plan, your entire non-tool response must be exactly one <plan>...</plan> block.
+- Do not output plain prose, markdown, greetings, apologies, or analysis outside the <plan> block.
+- If you are about to answer with anything other than a <plan> block, stop and rewrite it as a valid <plan> block instead.
+- After a <plan> already exists, on non-proceed turns in plan mode, never call tools.`)
+		details.push(`The <plan> must be explicit and execution-ready. Include:
+- Objective
+- Assumptions/constraints
+- Ordered checklist of atomic tasks
+- Per-task acceptance criteria
+- Risks and fallback notes`)
+		details.push(`The first <plan> must be grounded in actual repository findings:
+- Use discovered file paths, modules, APIs, commands, and tests when known.
+- Do not include generic discovery chores like "search the repo", "find the file", "generate a directory tree", or "inspect the codebase" as implementation tasks unless the user explicitly asked for those as deliverables.
+- The plan should begin at the first real implementation task, using discovery results as assumptions/context rather than checklist items.
+- If a critical detail is still unknown after lightweight discovery, mention it under assumptions/constraints or risks instead of padding the task list with search steps.`)
+		details.push(`Plan formatting requirements:
+- Each execution task must use a markdown heading, for example: "## Step 1: Update auth proto contract".
+- Under each step heading, include flat bullet points for what will be done in that step.
+- Prefer concrete file/module references in those bullets when known from discovery.
+- Do not format the plan as a single paragraph or a bare numbered sentence list.`)
+		details.push(`The <task_summary> must use this schema exactly so it can be indexed:
+<task_summary>
+<task_id>task-1</task_id>
+<task_name>Short task name</task_name>
+<status>completed</status>
+<summary>Short user-facing summary of the task result</summary>
+<explanation>Why this implementation choice was made</explanation>
+<what>What changed</what>
+<why>Why this task was needed</why>
+<where>Where in codebase (components/services/modules)</where>
+<files>
+- /absolute/path/or/workspace-relative-file-1
+- /absolute/path/or/workspace-relative-file-2
+</files>
+<code_snippets>
+\`\`\`language
+minimal relevant snippet users should review
+\`\`\`
+</code_snippets>
+<verification>Checks/tests/logging run for this task</verification>
+</task_summary>`)
+		details.push(`In <walkthrough>, include a "Task Index" section mapping each task_id to its files and a brief outcome, so users can deep-dive per task without scanning full chat.`)
+	}
 	if (mode === 'gather') {
 		details.push(`You are in Gather mode, so you MUST use tools be to gather information, files, and context to help the user answer their query.`)
 		details.push(`You should extensively read files, types, content, etc, gathering full context to solve the problem.`)
@@ -517,8 +597,9 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 	ansStrs.push(header)
 	ansStrs.push(sysInfo)
 	if (toolDefinitions) ansStrs.push(toolDefinitions)
-	ansStrs.push(importantDetails)
 	ansStrs.push(fsInfo)
+	if (semanticSnippets.length > 0) ansStrs.push(semanticInfo)
+	ansStrs.push(importantDetails)
 
 	const fullSystemMsgStr = ansStrs
 		.join('\n\n\n')

@@ -10,6 +10,10 @@ import { InstantiationType, registerSingleton } from '../../../../platform/insta
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import { URI } from '../../../../base/common/uri.js';
+import { ISearchService, QueryType, isFileMatch, resultIsMatch } from '../../../services/search/common/search.js';
+import { IAiEmbeddingVectorService } from '../../../services/aiEmbeddingVector/common/aiEmbeddingVectorService.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { IVoidModelService } from '../common/voidModelService.js';
 
 
 // make sure snippet logic works
@@ -27,6 +31,7 @@ export interface IContextGatheringService {
 	readonly _serviceBrand: undefined;
 	updateCache(model: ITextModel, pos: Position): Promise<void>;
 	getCachedSnippets(): string[];
+	getSemanticSnippets(query: string): Promise<string[]>;
 }
 
 export const IContextGatheringService = createDecorator<IContextGatheringService>('contextGatheringService');
@@ -42,7 +47,11 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 	constructor(
 		@ILanguageFeaturesService private readonly _langFeaturesService: ILanguageFeaturesService,
 		@IModelService private readonly _modelService: IModelService,
-		@ICodeEditorService private readonly _codeEditorService: ICodeEditorService
+		@ICodeEditorService private readonly _codeEditorService: ICodeEditorService,
+		@ISearchService private readonly _searchService: ISearchService,
+		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
+		@IAiEmbeddingVectorService private readonly _aiEmbeddingVectorService: IAiEmbeddingVectorService,
+		@IVoidModelService private readonly _voidModelService: IVoidModelService
 	) {
 		super();
 		this._modelService.getModels().forEach(model => this._subscribeToModel(model));
@@ -77,6 +86,45 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 
 	public getCachedSnippets(): string[] {
 		return this._cache;
+	}
+
+	public async getSemanticSnippets(query: string): Promise<string[]> {
+		const searchStart = Date.now();
+		console.log(`Void: Performing semantic search for: ${query}`);
+		if (!this._aiEmbeddingVectorService.isEnabled()) {
+			console.log(`Void: Semantic search skipped because embeddings are disabled (${Date.now() - searchStart}ms).`);
+			return [];
+		}
+
+		try {
+			const results = await this._searchService.aiTextSearch({
+				contentPattern: query,
+				type: QueryType.aiText,
+				folderQueries: this._workspaceContextService.getWorkspace().folders.map(f => ({ folder: f.uri })),
+				maxResults: 10
+			}, CancellationToken.None);
+
+			const snippets: string[] = [];
+			for (const result of results.results) {
+				if (isFileMatch(result)) {
+					const { model } = await this._voidModelService.getModelSafe(result.resource);
+					if (model) {
+						for (const searchResult of result.results || []) {
+							if (resultIsMatch(searchResult)) {
+								const range = searchResult.rangeLocations[0].source;
+								const snippet = this._getSnippetForRange(model, range, 2);
+								snippets.push(`File: ${result.resource.fsPath}\n${snippet}`);
+							}
+						}
+					}
+				}
+			}
+			console.log(`Void: Found ${snippets.length} semantic snippets in ${Date.now() - searchStart}ms.`);
+			return snippets;
+		} catch (e) {
+			console.error(`Semantic search error after ${Date.now() - searchStart}ms:`, e);
+			return [];
+		}
 	}
 
 	// Basic snippet extraction.

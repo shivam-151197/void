@@ -29,7 +29,7 @@ export interface IAiEmbeddingVectorProvider {
 export class AiEmbeddingVectorService implements IAiEmbeddingVectorService {
 	readonly _serviceBrand: undefined;
 
-	static readonly DEFAULT_TIMEOUT = 1000 * 10; // 10 seconds
+	static readonly DEFAULT_TIMEOUT = 1000 * 30; // 30 seconds
 
 	private readonly _providers: IAiEmbeddingVectorProvider[] = [];
 

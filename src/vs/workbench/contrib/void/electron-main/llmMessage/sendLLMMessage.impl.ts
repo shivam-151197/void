@@ -14,7 +14,7 @@ import { Tool as GeminiTool, FunctionDeclaration, GoogleGenAI, ThinkingConfig, S
 import { GoogleAuth } from 'google-auth-library'
 /* eslint-enable */
 
-import { AnthropicLLMChatMessage, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, ModelListParams, OllamaModelResponse, OnError, OnFinalMessage, OnText, RawToolCallObj, RawToolParamsObj } from '../../common/sendLLMMessageTypes.js';
+import { EmbeddingsParams, AnthropicLLMChatMessage, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, ModelListParams, OllamaModelResponse, OnError, OnFinalMessage, OnText, RawToolCallObj, RawToolParamsObj } from '../../common/sendLLMMessageTypes.js';
 import { ChatMode, displayInfoOfProviderName, ModelSelectionOptions, OverridesOfModel, ProviderName, SettingsOfProvider } from '../../common/voidSettingsTypes.js';
 import { getSendableReasoningInfo, getModelCapabilities, getProviderCapabilities, defaultProviderSettings, getReservedOutputTokenSpace } from '../../common/modelCapabilities.js';
 import { extractReasoningWrapper, extractXMLToolsWrapper } from './extractGrammar.js';
@@ -167,6 +167,11 @@ const newOpenAICompatibleSDK = async ({ settingsOfProvider, providerName, includ
 		const thisConfig = settingsOfProvider[providerName]
 		return new OpenAI({ baseURL: 'https://api.mistral.ai/v1', apiKey: thisConfig.apiKey, ...commonPayloadOpts })
 	}
+	else if (providerName === 'localProxy') {
+		const thisConfig = settingsOfProvider[providerName]
+		return new OpenAI({ baseURL: thisConfig.endpoint, apiKey: 'noop', ...commonPayloadOpts })
+	}
+
 
 	else throw new Error(`Void providerName was invalid: ${providerName}.`)
 }
@@ -418,6 +423,24 @@ const _openaiCompatibleList = async ({ onSuccess: onSuccess_, onError: onError_,
 			})
 	}
 	catch (error) {
+		onError({ error: error + '' })
+	}
+}
+const _sendOpenAICompatibleEmbeddings = async ({ text, onSuccess, onError, settingsOfProvider, providerName }: EmbeddingsParams) => {
+	try {
+		const openai = await newOpenAICompatibleSDK({ providerName, settingsOfProvider })
+		openai.embeddings.create({
+			model: 'text-embedding-3-small', // This can be customized if needed
+			input: text,
+		})
+			.then(response => {
+				const embeddings = response.data.map((d: any) => d.embedding)
+				onSuccess({ embeddings })
+			})
+			.catch(error => {
+				onError({ error: error + '' })
+			})
+	} catch (error) {
 		onError({ error: error + '' })
 	}
 }
@@ -851,6 +874,7 @@ type CallFnOfProvider = {
 		sendChat: (params: SendChatParams_Internal) => Promise<void>;
 		sendFIM: ((params: SendFIMParams_Internal) => void) | null;
 		list: ((params: ListParams_Internal<any>) => void) | null;
+		getEmbeddings: ((params: EmbeddingsParams) => void) | null;
 	}
 }
 
@@ -859,56 +883,67 @@ export const sendLLMMessageToProviderImplementation = {
 		sendChat: sendAnthropicChat,
 		sendFIM: null,
 		list: null,
+		getEmbeddings: null,
 	},
 	openAI: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: null,
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	xAI: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: null,
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	gemini: {
 		sendChat: (params) => sendGeminiChat(params),
 		sendFIM: null,
 		list: null,
+		getEmbeddings: null,
 	},
 	mistral: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: (params) => sendMistralFIM(params),
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	ollama: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: sendOllamaFIM,
 		list: ollamaList,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	openAICompatible: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params), // using openai's SDK is not ideal (your implementation might not do tools, reasoning, FIM etc correctly), talk to us for a custom integration
 		sendFIM: (params) => _sendOpenAICompatibleFIM(params),
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	openRouter: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: (params) => _sendOpenAICompatibleFIM(params),
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	vLLM: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: (params) => _sendOpenAICompatibleFIM(params),
 		list: (params) => _openaiCompatibleList(params),
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	deepseek: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: null,
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	groq: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: null,
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 
 	lmStudio: {
@@ -916,29 +951,41 @@ export const sendLLMMessageToProviderImplementation = {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: (params) => _sendOpenAICompatibleFIM(params),
 		list: (params) => _openaiCompatibleList(params),
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	liteLLM: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: (params) => _sendOpenAICompatibleFIM(params),
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	googleVertex: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: null,
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	microsoftAzure: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: null,
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 	awsBedrock: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
 		sendFIM: null,
 		list: null,
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
+	},
+	localProxy: {
+		sendChat: (params) => _sendOpenAICompatibleChat(params),
+		sendFIM: (params) => _sendOpenAICompatibleFIM(params),
+		list: (params) => _openaiCompatibleList(params),
+		getEmbeddings: (params) => _sendOpenAICompatibleEmbeddings(params),
 	},
 
 } satisfies CallFnOfProvider
+
 
 
 

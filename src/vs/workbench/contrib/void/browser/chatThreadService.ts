@@ -12,7 +12,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { ILLMMessageService } from '../common/sendLLMMessageService.js';
 import { chat_userMessageContent, isABuiltinToolName } from '../common/prompt/prompts.js';
-import { AnthropicReasoning, getErrorMessage, RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
+import { AnthropicReasoning, getErrorMessage, LLMChatMessage, RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { FeatureName, ModelSelection, ModelSelectionOptions } from '../common/voidSettingsTypes.js';
 import { IVoidSettingsService } from '../common/voidSettingsService.js';
@@ -39,6 +39,8 @@ import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IMCPService } from '../common/mcpService.js';
 import { RawMCPToolCall } from '../common/mcpServiceTypes.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 
 
 // related to retrying when LLM message has error
@@ -102,6 +104,77 @@ const defaultMessageState: UserMessageState = {
 	isBeingEdited: false,
 }
 
+type PlanTaskJournalEntry = {
+	taskId: string;
+	taskName: string;
+	summary: string;
+	explanation: string;
+	codeSnippets: string[];
+	presentedResponse: string;
+	what: string;
+	why: string;
+	where: string;
+	files: string[];
+	status: 'pending' | 'in_progress' | 'completed';
+	updatedAtISO: string;
+}
+
+const extractTagBlock = (s: string, tagName: string): string | null => {
+	const match = s.match(new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'i'))
+	return match?.[1]?.trim() ?? null
+}
+const extractAllCodeBlocks = (s: string): string[] => {
+	const matches = s.match(/```[\s\S]*?```/g)
+	return matches?.map(m => m.trim()) ?? []
+}
+
+const planContainsGroundworkSteps = (plan: string): boolean => {
+	const normalized = plan.toLowerCase()
+	const suspiciousPatterns = [
+		'generate a directory tree',
+		'list the directory tree',
+		'search the repo',
+		'search the repository',
+		'search the codebase',
+		'find the file',
+		'find the files',
+		'locate the',
+		'identify the .proto',
+		'identify the proto',
+		'identify the file',
+		'identify the files',
+		'open the ',
+		'read the current',
+		'inspect the codebase',
+		'explore the codebase',
+		'determine what updates are needed',
+		'understand existing',
+	]
+	return suspiciousPatterns.some(pattern => normalized.includes(pattern))
+}
+
+const planHasStructuredStepHeadings = (plan: string): boolean => {
+	return /(^|\n)#{2,3}\s+/.test(plan)
+}
+
+const formatStructuredMarkdownBlock = (raw: string, heading: string): string => {
+	const trimmed = raw.trim()
+	if (!trimmed) return `# ${heading}\n`
+
+	const normalized = trimmed
+		.replace(/\r\n/g, '\n')
+		.replace(/^\s*[-*]\s+/gm, '- ')
+		.replace(/(\d+)\.\s+/g, '\n$1. ')
+		.replace(/\n{3,}/g, '\n\n')
+		.trim()
+
+	const body = normalized.startsWith('#')
+		? normalized
+		: `# ${heading}\n\n${normalized}`
+
+	return `${body.trim()}\n`
+}
+
 // a 'thread' means a chat message history
 
 type WhenMounted = {
@@ -137,6 +210,10 @@ export type ThreadType = {
 			whenMounted: Promise<WhenMounted>
 			_whenMountedResolver: (res: WhenMounted) => void
 			mountedIsResolvedRef: { current: boolean };
+		}
+
+		planModeState?: {
+			taskJournal: PlanTaskJournalEntry[];
 		}
 
 
@@ -217,6 +294,9 @@ const newThreadObject = () => {
 			stagingSelections: [],
 			focusedMessageIdx: undefined,
 			linksOfMessageIdx: {},
+			planModeState: {
+				taskJournal: [],
+			},
 		},
 		filesWithUserChanges: new Set()
 	} satisfies ThreadType
@@ -291,6 +371,9 @@ export interface IChatThreadService {
 
 	focusCurrentChat: () => Promise<void>
 	blurCurrentChat: () => Promise<void>
+	preparePlanReviewDraftInCurrentChat: () => Promise<void>
+	submitPlanProceedInCurrentThread: () => Promise<void>
+	submitPlanReviewFeedbackInCurrentThread: (feedback: string) => Promise<void>
 }
 
 export const IChatThreadService = createDecorator<IChatThreadService>('voidChatThreadService');
@@ -327,6 +410,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		@IDirectoryStrService private readonly _directoryStringService: IDirectoryStrService,
 		@IFileService private readonly _fileService: IFileService,
 		@IMCPService private readonly _mcpService: IMCPService,
+		@ICommandService private readonly _commandService: ICommandService,
 	) {
 		super()
 		this.state = { allThreads: {}, currentThreadId: null as unknown as string } // default state
@@ -377,6 +461,58 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		if (!this.isCurrentlyFocusingMessage()) {
 			s?.textAreaRef.current?.blur()
 		}
+	}
+
+	async preparePlanReviewDraftInCurrentChat() {
+		const draft = `PLAN_REVIEW_FEEDBACK:
+Please revise and replace the previous <plan> based on this feedback:
+
+
+Important:
+- Output ONLY a full replacement <plan> block.
+- Do not execute tools.
+- Remove outdated plan items and return a clean updated plan.`
+		const threadId = this.state.currentThreadId
+		const thread = this.state.allThreads[threadId]
+		if (!thread) return
+		const mounted = await thread.state.mountedInfo?.whenMounted
+		const textarea = mounted?.textAreaRef.current
+		if (!textarea) return
+		textarea.value = draft
+		textarea.dispatchEvent(new InputEvent('input', { bubbles: true }))
+		textarea.focus()
+		const selectionStart = draft.indexOf('based on this feedback:') + 'based on this feedback:\n'.length
+		const selectionEnd = draft.indexOf('\n\nImportant:')
+		textarea.setSelectionRange(selectionStart, selectionEnd)
+	}
+
+	async submitPlanProceedInCurrentThread() {
+		const proceedMessage = `PLAN_PROCEED:
+Execute exactly ONE atomic pending task from the latest approved <plan>.
+
+Rules:
+- Use only the minimum required context from the initial request, current plan, and just-in-time project reads.
+- Do not start a second task in this turn.
+- After completion, output a <task_summary> with:
+  - task name
+  - files changed
+  - checks/verifications run
+  - remaining tasks status`
+		await this.addUserMessageAndStreamResponse({ userMessage: proceedMessage, threadId: this.state.currentThreadId })
+	}
+
+	async submitPlanReviewFeedbackInCurrentThread(feedback: string) {
+		const trimmedFeedback = feedback.trim()
+		if (!trimmedFeedback) return
+		const reviewMessage = `PLAN_REVIEW_FEEDBACK:
+Please revise and replace the previous <plan> based on this feedback:
+${trimmedFeedback}
+
+Important:
+- Output ONLY a full replacement <plan> block.
+- Do not execute tools.
+- Remove outdated plan items and return a clean updated plan.`
+		await this.addUserMessageAndStreamResponse({ userMessage: reviewMessage, threadId: this.state.currentThreadId })
 	}
 
 
@@ -482,6 +618,147 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	private _setStreamState(threadId: string, state: ThreadStreamState[string]) {
 		this.streamState[threadId] = state
 		this._onDidChangeStreamState.fire({ threadId })
+	}
+
+	private _primaryWorkspaceURI() {
+		return this._workspaceContextService.getWorkspace().folders[0]?.uri
+	}
+
+	private async _writeWorkspaceFile(relativePath: string, content: string) {
+		const workspaceURI = this._primaryWorkspaceURI()
+		if (!workspaceURI) return
+		const uri = URI.joinPath(workspaceURI, relativePath)
+		await this._fileService.writeFile(uri, VSBuffer.fromString(content))
+	}
+
+	private async _openWorkspaceFile(relativePath: string) {
+		const workspaceURI = this._primaryWorkspaceURI()
+		if (!workspaceURI) return
+		const uri = URI.joinPath(workspaceURI, relativePath)
+		await this._commandService.executeCommand('vscode.open', uri)
+	}
+
+	private _taskJournalMarkdown(threadId: string) {
+		const thread = this.state.allThreads[threadId]
+		if (!thread) return '# Plan Task Log\n\n_No task summaries yet._\n'
+		const tasks = thread.state.planModeState?.taskJournal ?? []
+		if (tasks.length === 0) return '# Plan Task Log\n\n_No task summaries yet._\n'
+		const lines: string[] = ['# Plan Task Log', '']
+		for (const task of tasks) {
+			lines.push(`## ${task.taskId} - ${task.taskName}`)
+			lines.push(`- Status: ${task.status}`)
+			lines.push(`- Updated: ${task.updatedAtISO}`)
+			lines.push(`- Summary: ${task.summary || '(none)'}`)
+			lines.push(`- Explanation: ${task.explanation || '(none)'}`)
+			lines.push(`- Where: ${task.where || '(none)'}`)
+			lines.push('')
+			lines.push('### Files')
+			if (task.files.length === 0) lines.push('- (none)')
+			else task.files.forEach(f => lines.push(`- \`${f}\``))
+			lines.push('')
+			lines.push('### Snippets')
+			if (task.codeSnippets.length === 0) lines.push('_No snippets captured._')
+			else task.codeSnippets.forEach(snippet => lines.push(`${snippet}\n`))
+			lines.push('')
+		}
+		return lines.join('\n')
+	}
+
+	private async _persistPlanArtifactsFromAssistant(threadId: string, assistantText: string) {
+		const plan = extractTagBlock(assistantText, 'plan')
+		if (plan) {
+			await this._writeWorkspaceFile('implementation_plan.md.resolved', formatStructuredMarkdownBlock(plan, 'Implementation Plan'))
+			await this._openWorkspaceFile('implementation_plan.md.resolved')
+		}
+
+		const walkthrough = extractTagBlock(assistantText, 'walkthrough')
+		if (walkthrough) {
+			await this._writeWorkspaceFile('walkthrough.md', formatStructuredMarkdownBlock(walkthrough, 'Plan Walkthrough'))
+			await this._openWorkspaceFile('walkthrough.md')
+		}
+	}
+
+	private _collectToolTouchedFilesSincePreviousAssistant(threadId: string): string[] {
+		const thread = this.state.allThreads[threadId]
+		if (!thread) return []
+		const messages = thread.messages
+		let latestAssistantIdx = -1
+		for (let i = messages.length - 1; i >= 0; i -= 1) {
+			if (messages[i].role === 'assistant') {
+				latestAssistantIdx = i
+				break
+			}
+		}
+		const startIdx = latestAssistantIdx + 1
+		const filesSet = new Set<string>()
+		for (let i = startIdx; i < messages.length; i += 1) {
+			const message = messages[i]
+			if (message.role !== 'tool' || message.type !== 'success') continue
+			const params = message.params as any
+			const uri = params?.uri?.fsPath ?? params?.uri
+			if (typeof uri === 'string' && uri) filesSet.add(uri)
+		}
+		return [...filesSet]
+	}
+
+	private async _recordPlanTaskSummaryIfPresent(threadId: string, assistantText: string) {
+		const summaryBlock = extractTagBlock(assistantText, 'task_summary')
+		if (!summaryBlock) return
+
+		const thread = this.state.allThreads[threadId]
+		if (!thread) return
+		const now = new Date().toISOString()
+		const taskId = extractTagBlock(summaryBlock, 'task_id') || `task-${thread.messages.length}`
+		const taskName = extractTagBlock(summaryBlock, 'task_name') || `Task ${thread.messages.length}`
+		const summaryText = extractTagBlock(summaryBlock, 'summary') || ''
+		const explanation = extractTagBlock(summaryBlock, 'explanation') || ''
+		const what = extractTagBlock(summaryBlock, 'what') || summaryBlock
+		const why = extractTagBlock(summaryBlock, 'why') || ''
+		const where = extractTagBlock(summaryBlock, 'where') || ''
+		const statusRaw = (extractTagBlock(summaryBlock, 'status') || 'completed').toLowerCase()
+		const status: PlanTaskJournalEntry['status'] =
+			statusRaw === 'pending' ? 'pending'
+				: statusRaw === 'in_progress' ? 'in_progress'
+					: 'completed'
+
+		const filesInSummary = (extractTagBlock(summaryBlock, 'files') || '')
+			.split('\n')
+			.map(line => line.replace(/^[-*\s`]+/, '').replace(/[`]/g, '').trim())
+			.filter(Boolean)
+		const filesFromTools = this._collectToolTouchedFilesSincePreviousAssistant(threadId)
+		const files = [...new Set([...filesInSummary, ...filesFromTools])]
+		const codeSnippets = extractAllCodeBlocks(summaryBlock)
+
+		const prevJournal = thread.state.planModeState?.taskJournal ?? []
+		const prevIdx = prevJournal.findIndex(t => t.taskId === taskId)
+		const entry: PlanTaskJournalEntry = {
+			taskId,
+			taskName,
+			summary: summaryText || what,
+			explanation: explanation || why,
+			codeSnippets,
+			presentedResponse: summaryBlock,
+			what,
+			why,
+			where,
+			files,
+			status,
+			updatedAtISO: now
+		}
+
+		const nextJournal = prevIdx === -1
+			? [...prevJournal, entry]
+			: [
+				...prevJournal.slice(0, prevIdx),
+				{ ...prevJournal[prevIdx], ...entry },
+				...prevJournal.slice(prevIdx + 1),
+			]
+
+		this._setThreadState(threadId, {
+			planModeState: { taskJournal: nextJournal }
+		}, true)
+		await this._writeWorkspaceFile('plan_task_log.md', this._taskJournalMarkdown(threadId))
+		await this._openWorkspaceFile('plan_task_log.md')
 	}
 
 
@@ -609,6 +886,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		mcpServerName: string | undefined,
 		opts: { preapproved: true, unvalidatedToolParams: RawToolParamsObj, validatedParams: ToolCallParams<ToolName> } | { preapproved: false, unvalidatedToolParams: RawToolParamsObj },
 	): Promise<{ awaitingUserApproval?: boolean, interrupted?: boolean }> => {
+		const toolCallStart = Date.now();
+		console.log(`[Void][AgentLoop][${threadId}] _runToolCall start name=${toolName} toolId=${toolId} preapproved=${opts.preapproved} mcpServer=${mcpServerName ?? 'builtin'}`);
 
 		// compute these below
 		let toolParams: ToolCallParams<ToolName>
@@ -647,6 +926,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				// add a tool_request because we use it for UI if a tool is loading (this should be improved in the future)
 				this._addMessageToThread(threadId, { role: 'tool', type: 'tool_request', content: '(Awaiting user permission...)', result: null, name: toolName, params: toolParams, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
 				if (!autoApprove) {
+					console.log(`[Void][AgentLoop][${threadId}] tool=${toolName} awaiting user approval after ${Date.now() - toolCallStart}ms`);
 					return { awaitingUserApproval: true }
 				}
 			}
@@ -695,13 +975,20 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				})).result
 			}
 
-			if (interrupted) { return { interrupted: true } } // the tool result is added where we interrupt, not here
+			if (interrupted) {
+				console.log(`[Void][AgentLoop][${threadId}] tool=${toolName} interrupted after ${Date.now() - toolCallStart}ms`);
+				return { interrupted: true }
+			} // the tool result is added where we interrupt, not here
 		}
 		catch (error) {
 			resolveInterruptor(() => { }) // resolve for the sake of it
-			if (interrupted) { return { interrupted: true } } // the tool result is added where we interrupt, not here
+			if (interrupted) {
+				console.log(`[Void][AgentLoop][${threadId}] tool=${toolName} interrupted during error path after ${Date.now() - toolCallStart}ms`);
+				return { interrupted: true }
+			} // the tool result is added where we interrupt, not here
 
 			const errorMessage = getErrorMessage(error)
+			console.error(`[Void][AgentLoop][${threadId}] tool=${toolName} failed after ${Date.now() - toolCallStart}ms: ${errorMessage}`);
 			this._updateLatestTool(threadId, { role: 'tool', type: 'tool_error', params: toolParams, result: errorMessage, name: toolName, content: errorMessage, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
 			return {}
 		}
@@ -723,6 +1010,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 		// 5. add to history and keep going
 		this._updateLatestTool(threadId, { role: 'tool', type: 'success', params: toolParams, result: toolResult, name: toolName, content: toolResultStr, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+		console.log(`[Void][AgentLoop][${threadId}] tool=${toolName} succeeded in ${Date.now() - toolCallStart}ms`);
 		return {}
 	};
 
@@ -754,6 +1042,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		let nMessagesSent = 0
 		let shouldSendAnotherMessage = true
 		let isRunningWhenEnd: IsRunningType = undefined
+		let correctiveRetryInstruction: string | null = null
 
 		// before enter loop, call tool
 		if (callThisToolFirst) {
@@ -777,11 +1066,14 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
 
 			const chatMessages = this.state.allThreads[threadId]?.messages ?? []
+			const prepareStart = Date.now();
+			console.log(`[Void][AgentLoop][${threadId}] preparing chat messages (iteration=${nMessagesSent}, mode=${chatMode}, history=${chatMessages.length})`);
 			const { messages, separateSystemMessage } = await this._convertToLLMMessagesService.prepareLLMChatMessages({
 				chatMessages,
 				modelSelection,
 				chatMode
 			})
+			console.log(`[Void][AgentLoop][${threadId}] prepared chat messages in ${Date.now() - prepareStart}ms (iteration=${nMessagesSent}, outbound=${messages.length}, separateSystem=${!!separateSystemMessage})`);
 
 			if (interruptedWhenIdle) {
 				this._setStreamState(threadId, undefined)
@@ -802,10 +1094,23 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				let resMessageIsDonePromise: (res: ResTypes) => void // resolves when user approves this tool use (or if tool doesn't require approval)
 				const messageIsDonePromise = new Promise<ResTypes>((res, rej) => { resMessageIsDonePromise = res })
 
+					const outboundMessages: LLMChatMessage[] = correctiveRetryInstruction
+						? [
+							...messages,
+							{
+								role: 'user',
+								content: correctiveRetryInstruction,
+							} as LLMChatMessage
+						]
+						: messages
+				if (correctiveRetryInstruction) {
+					console.warn(`[Void][AgentLoop][${threadId}] retrying iteration=${nMessagesSent} with corrective plan instruction`);
+				}
+
 				const llmCancelToken = this._llmMessageService.sendLLMMessage({
 					messagesType: 'chatMessages',
 					chatMode,
-					messages: messages,
+					messages: outboundMessages,
 					modelSelection,
 					modelSelectionOptions,
 					overridesOfModel,
@@ -815,9 +1120,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: fullText, reasoningSoFar: fullReasoning, toolCallSoFar: toolCall ?? null }, interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) }) })
 					},
 					onFinalMessage: async ({ fullText, fullReasoning, toolCall, anthropicReasoning, }) => {
+						console.log(`[Void][AgentLoop][${threadId}] final LLM message received (iteration=${nMessagesSent}, textLength=${fullText.length}, reasoningLength=${fullReasoning.length}, toolCall=${toolCall?.name ?? 'none'}, hasPlan=${fullText.includes('<plan>')})`);
 						resMessageIsDonePromise({ type: 'llmDone', toolCall, info: { fullText, fullReasoning, anthropicReasoning } }) // resolve with tool calls
 					},
 					onError: async (error) => {
+						console.error(`[Void][AgentLoop][${threadId}] LLM error on iteration=${nMessagesSent}: ${error.message}`);
 						resMessageIsDonePromise({ type: 'llmError', error: error })
 					},
 					onAbort: () => {
@@ -876,8 +1183,111 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 				// llm res success
 				const { toolCall, info } = llmRes
+				console.log(`[Void][AgentLoop][${threadId}] LLM iteration=${nMessagesSent} completed with toolCall=${toolCall?.name ?? 'none'} textLength=${info.fullText.length}`);
+
+				const latestAssistantPlanAlreadyExists = chatMessages.some(m => m.role === 'assistant' && !!extractTagBlock(m.displayContent, 'plan'))
+				const hasSuccessfulToolContext = chatMessages.some(m => m.role === 'tool' && m.type === 'success')
+				const hasPlanBlock = !!extractTagBlock(info.fullText, 'plan')
+				const extractedPlan = extractTagBlock(info.fullText, 'plan') ?? ''
+				const needsInitialPlanRetry =
+					chatMode === 'plan' &&
+					!latestAssistantPlanAlreadyExists &&
+					hasSuccessfulToolContext &&
+					!hasPlanBlock &&
+					!toolCall &&
+					!correctiveRetryInstruction
+
+				const needsInitialDiscoveryRetry =
+					chatMode === 'plan' &&
+					!latestAssistantPlanAlreadyExists &&
+					!hasSuccessfulToolContext &&
+					!toolCall &&
+					!correctiveRetryInstruction
+
+				const needsPlanGroundingRetry =
+					chatMode === 'plan' &&
+					!latestAssistantPlanAlreadyExists &&
+					hasSuccessfulToolContext &&
+					hasPlanBlock &&
+					!toolCall &&
+					!correctiveRetryInstruction &&
+					(
+						planContainsGroundworkSteps(extractedPlan) ||
+						!planHasStructuredStepHeadings(extractedPlan)
+					)
+
+				const needsDiscoveryBeforePlanRetry =
+					chatMode === 'plan' &&
+					!latestAssistantPlanAlreadyExists &&
+					!hasSuccessfulToolContext &&
+					hasPlanBlock &&
+					!toolCall &&
+					!correctiveRetryInstruction
+
+				if (needsInitialDiscoveryRetry) {
+					correctiveRetryInstruction = [
+						'You are still missing repository grounding.',
+						'Do not write a plan yet.',
+						'First call a real repository discovery tool to inspect the codebase.',
+						'After tool results come back, continue discovery until you know the concrete files/modules involved.',
+						'Only then write the first <plan>.',
+					].join(' ')
+					console.warn(`[Void][AgentLoop][${threadId}] plan mode response arrived before any successful discovery tool results; scheduling discovery retry`);
+					shouldRetryLLM = true
+					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+					continue
+				}
+
+				if (needsDiscoveryBeforePlanRetry) {
+					correctiveRetryInstruction = [
+						'Your previous <plan> was created too early.',
+						'Do not create the first plan before repository discovery is complete.',
+						'First use repository discovery tools to inspect the actual codebase and identify the relevant files.',
+						'After discovery results are available, write the first <plan> using those findings.',
+					].join(' ')
+					console.warn(`[Void][AgentLoop][${threadId}] plan mode response contained a plan before any successful discovery tool results; scheduling discovery retry`);
+					shouldRetryLLM = true
+					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+					continue
+				}
+
+				if (needsInitialPlanRetry) {
+					correctiveRetryInstruction = [
+						'Your previous response did not follow Plan Mode.',
+						'Respond again with ONLY a single <plan>...</plan> block.',
+						'Do not include any prose before or after the <plan> block.',
+						'Do not apologize.',
+						'Do not ask a follow-up question.',
+					].join(' ')
+					console.warn(`[Void][AgentLoop][${threadId}] plan mode response missing <plan>; scheduling one corrective retry`);
+					shouldRetryLLM = true
+					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+					continue
+				}
+
+				if (needsPlanGroundingRetry) {
+					correctiveRetryInstruction = [
+						'Your previous <plan> is invalid.',
+						'Do not include groundwork, search, grep, locate, identify, open, inspect, or directory-tree tasks inside the plan.',
+						'Finish all lightweight repository discovery before writing the plan.',
+						'The plan is for execution only.',
+						'Rewrite the plan using concrete discovered files/modules when known.',
+						'Format the plan with markdown step headings like "## Step 1: ...".',
+						'Under each step heading, include flat bullet points describing exactly what will be done in that step.',
+						'Respond again with ONLY a single replacement <plan>...</plan> block.',
+					].join(' ')
+					console.warn(`[Void][AgentLoop][${threadId}] plan mode response contained groundwork tasks or missing step headings; scheduling one corrective retry`);
+					shouldRetryLLM = true
+					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+					continue
+				}
+				correctiveRetryInstruction = null
 
 				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, anthropicReasoning: info.anthropicReasoning })
+				if (chatMode === 'plan') {
+					await this._persistPlanArtifactsFromAssistant(threadId, info.fullText)
+					await this._recordPlanTaskSummaryIfPresent(threadId, info.fullText)
+				}
 
 				this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative for clarity
 
@@ -895,6 +1305,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					else { shouldSendAnotherMessage = true }
 
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative, for clarity
+				}
+				else {
+					console.log(`[Void][AgentLoop][${threadId}] ending loop after iteration=${nMessagesSent} because no tool call was returned`);
 				}
 
 			} // end while (attempts)
