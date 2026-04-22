@@ -16,9 +16,10 @@ import { computeDirectoryTree1Deep, IDirectoryStrService, stringifyDirectoryTree
 import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js'
 import { timeout } from '../../../../base/common/async.js'
 import { RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
-import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME } from '../common/prompt/prompts.js'
+import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, tripleTick } from '../common/prompt/prompts.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
+import { IVoidIndexService } from '../common/index/indexServiceTypes.js'
 
 
 // tool use for AI
@@ -153,6 +154,7 @@ export class ToolsService implements IToolsService {
 		@IDirectoryStrService private readonly directoryStrService: IDirectoryStrService,
 		@IMarkerService private readonly markerService: IMarkerService,
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
+		@IVoidIndexService private readonly voidIndexService: IVoidIndexService,
 	) {
 		const queryBuilder = instantiationService.createInstance(QueryBuilder);
 
@@ -288,6 +290,12 @@ export class ToolsService implements IToolsService {
 				const { persistent_terminal_id: terminalIdUnknown } = params;
 				const persistentTerminalId = validateProposedTerminalId(terminalIdUnknown);
 				return { persistentTerminalId };
+			},
+			semantic_search: (params: RawToolParamsObj) => {
+				const { query: queryUnknown, limit: limitUnknown } = params
+				const query = validateStr('query', queryUnknown)
+				const limit = validateNumber(limitUnknown, { default: 10 }) ?? 10
+				return { query, limit }
 			},
 
 		}
@@ -461,6 +469,10 @@ export class ToolsService implements IToolsService {
 				await this.terminalToolService.killPersistentTerminal(persistentTerminalId)
 				return { result: {} }
 			},
+			semantic_search: async ({ query, limit }) => {
+				const symbols = await this.voidIndexService.semanticSearch(query, limit)
+				return { result: { symbols } }
+			},
 		}
 
 
@@ -563,6 +575,12 @@ export class ToolsService implements IToolsService {
 			},
 			kill_persistent_terminal: (params, _result) => {
 				return `Successfully closed terminal "${params.persistentTerminalId}".`;
+			},
+			semantic_search: (params, result) => {
+				if (result.symbols.length === 0) return 'No relevant symbols found.'
+				return result.symbols
+					.map(s => `Symbol: ${s.name} (${s.type})\nFile: ${s.uri.fsPath}\nRange: ${s.range.startLine}-${s.range.endLine}\nContent:\n${tripleTick[0]}\n${s.text}\n${tripleTick[1]}`)
+					.join('\n\n')
 			},
 		}
 

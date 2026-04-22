@@ -60,6 +60,7 @@ export type BuiltinToolCallParams = {
 	'open_persistent_terminal': { cwd: string | null },
 	'run_persistent_command': { command: string; persistentTerminalId: string },
 	'kill_persistent_terminal': { persistentTerminalId: string },
+	'semantic_search': { query: string, limit: number },
 }
 
 // RESULT OF TOOL CALL
@@ -81,6 +82,7 @@ export type BuiltinToolResultType = {
 	'run_persistent_command': { result: string; resolveReason: TerminalResolveReason; },
 	'open_persistent_terminal': { persistentTerminalId: string },
 	'kill_persistent_terminal': {},
+	'semantic_search': { symbols: import('./index/indexServiceTypes.js').IndexedSymbol[] },
 }
 
 

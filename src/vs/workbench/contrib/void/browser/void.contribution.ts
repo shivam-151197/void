@@ -68,6 +68,9 @@ import './voidSCMService.js'
 import './voidEmbeddingProvider.js'
 import './voidAiSearchProvider.js'
 
+// register indexing service
+import './index/voidIndexService.js'
+
 // ---------- common (unclear if these actually need to be imported, because they're already imported wherever they're used) ----------
 
 // llmMessage

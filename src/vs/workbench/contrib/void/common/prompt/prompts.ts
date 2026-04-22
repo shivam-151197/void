@@ -336,6 +336,15 @@ export const builtinTools: {
 		name: 'kill_persistent_terminal',
 		description: `Interrupts and closes a persistent terminal that you opened with open_persistent_terminal.`,
 		params: { persistent_terminal_id: { description: `The ID of the persistent terminal.` } }
+	},
+
+	semantic_search: {
+		name: 'semantic_search',
+		description: `Performs a semantic search over the codebase using tree-sitter based indexing and vector embeddings. This is the most effective way to find relevant code snippets by natural language query.`,
+		params: {
+			query: { description: `Your natural language query for the search.` },
+			limit: { description: `Optional. The maximum number of results to return. Default is 10.` }
+		},
 	}
 
 
@@ -371,11 +380,11 @@ export const availableTools = (chatMode: ChatMode | null, mcpTools: InternalTool
 	]
 	const builtinToolNames: BuiltinToolName[] | undefined = chatMode === 'normal' ? normalReadOnlyTools
 		: chatMode === 'gather' ? (Object.keys(builtinTools) as BuiltinToolName[]).filter(toolName => !(toolName in approvalTypeOfBuiltinToolName))
-			: chatMode === 'agent' ? Object.keys(builtinTools) as BuiltinToolName[]
+			: (chatMode === 'agent' || chatMode === 'plan') ? Object.keys(builtinTools) as BuiltinToolName[]
 				: undefined
 
 	const effectiveBuiltinTools = builtinToolNames?.map(toolName => builtinTools[toolName]) ?? undefined
-	const effectiveMCPTools = chatMode === 'agent' ? mcpTools : undefined
+	const effectiveMCPTools = (chatMode === 'agent' || chatMode === 'plan') ? mcpTools : undefined
 
 	const tools: InternalToolInfo[] | undefined = !(builtinToolNames || mcpTools) ? undefined
 		: [
@@ -488,8 +497,10 @@ ${semanticSnippets.join('\n\n')}
 		details.push(`NEVER say something like "I'm going to use \`tool_name\`". Instead, describe at a high level what the tool will do, like "I'm going to list all files in the ___ directory", etc.`)
 		details.push(`Many tools only work if the user has a workspace open.`)
 		details.push(`For repository-change requests (refactor, replace API usage, migration, bug fix, feature edits), your FIRST response must include a real tool call that gathers code context. Do not stop at a narrative like "I'll inspect the repository" without calling a tool.`)
+		details.push(`Use tools like \`semantic_search\` to find relevant code snippets by natural language if you are unsure where to look.`)
+		details.push(`Do NOT ask the user for basic information about the repository (e.g., "where are the proto files?") until after you have exhausted your own search tools like \`semantic_search\` and \`get_dir_tree\`.`)
 		details.push(`If a tool call is required, end the response with that tool call and no additional trailing text.`)
-		details.push(`Do not end your turn until you have either: (a) produced the mode-required structured output, or (b) emitted a real tool call that advances the user's task.`)
+		details.push(`Do not end your turn until you have either: (a) produced the mode-required structured output (like a <plan>), or (b) emitted a real tool call that advances the user's task.`)
 		details.push(`Never stop after generic prose such as "I'll inspect the repository", "Let's start by exploring", or "I can help with that". Those are invalid incomplete responses.`)
 	}
 	else {
