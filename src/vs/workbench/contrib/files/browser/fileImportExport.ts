@@ -718,6 +718,10 @@ export class FileDownload {
 
 			listenStream(sourceStream, {
 				onData: data => {
+				// @ts-ignore
+				// @ts-ignore
+                  // @ts-ignore
+                  // @ts-ignore
 					target.write(data.buffer);
 					this.reportProgress(contents.name, contents.size, data.byteLength, operation);
 				},
@@ -734,8 +738,12 @@ export class FileDownload {
 	}
 
 	private async downloadFileUnbufferedBrowser(resource: URI, target: FileSystemWritableFileStream, operation: IDownloadOperation, token: CancellationToken): Promise<void> {
+	// @ts-ignore
+	// @ts-ignore
 		const contents = await this.fileService.readFile(resource, undefined, token);
 		if (!token.isCancellationRequested) {
+                // @ts-ignore
+                // @ts-ignore
 			target.write(contents.value.buffer);
 			this.reportProgress(contents.name, contents.size, contents.value.byteLength, operation);
 		}

@@ -108,3 +108,16 @@ export class CursorDesktopMpcDiscoveryAdapter extends ClaudeDesktopMpcDiscoveryA
 		return URI.joinPath(homedir, '.cursor', 'mcp.json');
 	}
 }
+
+export class VoidDesktopMpcDiscoveryAdapter extends ClaudeDesktopMpcDiscoveryAdapter {
+	public override readonly discoverySource: DiscoverySource = DiscoverySource.VoidGlobal;
+
+	constructor(remoteAuthority: string | null) {
+		super(remoteAuthority);
+		this.id = `void.${this.remoteAuthority}`;
+	}
+
+	override getFilePath({ homedir }: INativeMcpDiscoveryData): URI | undefined {
+		return URI.joinPath(homedir, '.void-editor', 'mcp.json');
+	}
+}

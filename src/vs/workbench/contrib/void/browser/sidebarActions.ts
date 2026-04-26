@@ -22,6 +22,7 @@ import { VOID_CTRL_L_ACTION_ID } from './actionIDs.js';
 import { localize2 } from '../../../../nls.js';
 import { IChatThreadService } from './chatThreadService.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 
 // ---------- Register commands and keybindings ----------
 
@@ -71,6 +72,57 @@ registerAction2(class extends Action2 {
 		const chatThreadsService = accessor.get(IChatThreadService)
 		viewsService.openViewContainer(VOID_VIEW_CONTAINER_ID)
 		await chatThreadsService.focusCurrentChat()
+	}
+})
+
+const PLAN_FILE_NAME = 'implementation_plan.md.resolved'
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'void.plan.proceedFromEditor',
+			title: localize2('voidPlanProceedFromEditor', 'Proceed'),
+			f1: true,
+			menu: [{
+				id: MenuId.EditorTitle,
+				group: 'navigation',
+				when: ContextKeyExpr.equals('resourceFilename', PLAN_FILE_NAME),
+			}],
+		});
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const chatThreadService = accessor.get(IChatThreadService)
+		const viewsService = accessor.get(IViewsService)
+		viewsService.openViewContainer(VOID_VIEW_CONTAINER_ID)
+		await chatThreadService.submitPlanProceedInCurrentThread()
+	}
+})
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'void.plan.reviewFromEditor',
+			title: localize2('voidPlanReviewFromEditor', 'Review'),
+			f1: true,
+			menu: [{
+				id: MenuId.EditorTitle,
+				group: 'navigation',
+				when: ContextKeyExpr.equals('resourceFilename', PLAN_FILE_NAME),
+			}],
+		});
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const chatThreadService = accessor.get(IChatThreadService)
+		const viewsService = accessor.get(IViewsService)
+		const quickInputService = accessor.get(IQuickInputService)
+		viewsService.openViewContainer(VOID_VIEW_CONTAINER_ID)
+		const feedback = await quickInputService.input({
+			title: localize2('voidPlanReviewInputTitle', 'Review Implementation Plan').value,
+			prompt: localize2('voidPlanReviewInputPrompt', 'Enter review feedback to revise the current plan').value,
+			placeHolder: localize2('voidPlanReviewInputPlaceholder', 'Describe what should change in the plan').value,
+		})
+		if (!feedback?.trim()) return
+		await chatThreadService.submitPlanReviewFeedbackInCurrentThread(feedback)
 	}
 })
 

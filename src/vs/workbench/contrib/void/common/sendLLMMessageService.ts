@@ -3,7 +3,7 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
 
-import { EventLLMMessageOnTextParams, EventLLMMessageOnErrorParams, EventLLMMessageOnFinalMessageParams, ServiceSendLLMMessageParams, MainSendLLMMessageParams, MainLLMMessageAbortParams, ServiceModelListParams, EventModelListOnSuccessParams, EventModelListOnErrorParams, MainModelListParams, OllamaModelResponse, OpenaiCompatibleModelResponse, } from './sendLLMMessageTypes.js';
+import { EventLLMMessageOnTextParams, EventLLMMessageOnErrorParams, EventLLMMessageOnFinalMessageParams, ServiceSendLLMMessageParams, MainSendLLMMessageParams, MainLLMMessageAbortParams, ServiceModelListParams, EventModelListOnSuccessParams, EventModelListOnErrorParams, MainModelListParams, OllamaModelResponse, OpenaiCompatibleModelResponse, ServiceEmbeddingsParams, EventEmbeddingsOnSuccessParams, EventEmbeddingsOnErrorParams, MainEmbeddingsParams, } from './sendLLMMessageTypes.js';
 
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
@@ -24,6 +24,7 @@ export interface ILLMMessageService {
 	abort: (requestId: string) => void;
 	ollamaList: (params: ServiceModelListParams<OllamaModelResponse>) => void;
 	openAICompatibleList: (params: ServiceModelListParams<OpenaiCompatibleModelResponse>) => void;
+	getEmbeddings: (params: ServiceEmbeddingsParams) => void;
 }
 
 
@@ -51,11 +52,12 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 			success: {} as { [eventId: string]: ((params: EventModelListOnSuccessParams<OpenaiCompatibleModelResponse>) => void) },
 			error: {} as { [eventId: string]: ((params: EventModelListOnErrorParams<OpenaiCompatibleModelResponse>) => void) },
 		}
-	} satisfies {
-		[providerName in 'ollama' | 'openAICompat']: {
-			success: { [eventId: string]: ((params: EventModelListOnSuccessParams<any>) => void) },
-			error: { [eventId: string]: ((params: EventModelListOnErrorParams<any>) => void) },
-		}
+	}
+
+	// embedding hooks
+	private readonly embeddingHooks = {
+		success: {} as { [eventId: string]: ((params: EventEmbeddingsOnSuccessParams) => void) },
+		error: {} as { [eventId: string]: ((params: EventEmbeddingsOnErrorParams) => void) },
 	}
 
 	constructor(
@@ -97,6 +99,13 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 		this._register((this.channel.listen('onError_list_openAICompatible') satisfies Event<EventModelListOnErrorParams<OpenaiCompatibleModelResponse>>)(e => {
 			this.listHooks.openAICompat.error[e.requestId]?.(e)
 		}))
+		// embeddings
+		this._register((this.channel.listen('onSuccess_getEmbeddings') satisfies Event<EventEmbeddingsOnSuccessParams>)(e => {
+			this.embeddingHooks.success[e.requestId]?.(e)
+		}))
+		this._register((this.channel.listen('onError_getEmbeddings') satisfies Event<EventEmbeddingsOnErrorParams>)(e => {
+			this.embeddingHooks.error[e.requestId]?.(e)
+		}))
 
 	}
 
@@ -119,6 +128,7 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 		const { settingsOfProvider, } = this.voidSettingsService.state
 
 		const mcpTools = this.mcpService.getMCPTools()
+		console.log(`[Void][LLMMessageService] mcpTools resolved: ${mcpTools?.length ?? 0} tools: [${mcpTools?.map(t => t.name).join(', ') ?? 'none'}]`);
 
 		// add state for request id
 		const requestId = generateUuid();
@@ -182,6 +192,30 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 		} satisfies MainModelListParams<OpenaiCompatibleModelResponse>)
 	}
 
+	getEmbeddings = (params: ServiceEmbeddingsParams) => {
+		const { onSuccess, onError, ...proxyParams } = params
+
+		const { settingsOfProvider, modelSelectionOfFeature } = this.voidSettingsService.state
+		const modelSelection = modelSelectionOfFeature['Chat']
+		if (!modelSelection) {
+			onError({ error: 'No model selected' })
+			return
+		}
+
+		// add state for request id
+		const requestId_ = generateUuid();
+		this.embeddingHooks.success[requestId_] = onSuccess
+		this.embeddingHooks.error[requestId_] = onError
+
+		this.channel.call('getEmbeddings', {
+			...proxyParams,
+			settingsOfProvider,
+			providerName: modelSelection.providerName,
+			modelName: proxyParams.modelName ?? modelSelection.modelName,
+			requestId: requestId_,
+		} satisfies MainEmbeddingsParams)
+	}
+
 	private _clearChannelHooks(requestId: string) {
 		delete this.llmMessageHooks.onText[requestId]
 		delete this.llmMessageHooks.onFinalMessage[requestId]
@@ -192,8 +226,10 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 
 		delete this.listHooks.openAICompat.success[requestId]
 		delete this.listHooks.openAICompat.error[requestId]
+
+		delete this.embeddingHooks.success[requestId]
+		delete this.embeddingHooks.error[requestId]
 	}
 }
 
 registerSingleton(ILLMMessageService, LLMMessageService, InstantiationType.Eager);
-

@@ -206,9 +206,15 @@ export class MCPChannel implements IServerChannel {
 			});
 
 			await client.connect(transport)
+			console.log(`[Void][Diagnostic][Electron] Successfully connected to MCP server: ${serverName}`);
 
 			// Get the tools from the server
 			const { tools } = await client.listTools()
+			console.log(`[Void][Diagnostic][Electron] Server ${serverName} returned ${tools?.length ?? 0} tools`);
+			if (tools) {
+				console.log(`[Void][Diagnostic][Electron] Tools names from ${serverName}: ${tools.map(t => t.name).join(', ')}`);
+			}
+
 			const toolsWithUniqueName = tools.map(({ name, ...rest }) => ({ name: this._addUniquePrefix(name), ...rest }))
 
 			// Create a full command string for display
@@ -230,7 +236,10 @@ export class MCPChannel implements IServerChannel {
 	}
 
 	private _addUniquePrefix(base: string) {
-		return `${Math.random().toString(36).slice(2, 8)}_${base}`;
+		// Removed random prefix mangling. Tool names are now passed through unchanged.
+		// The random prefix (e.g. x9k2f1_grep) made names unrecognizable to the LLM
+		// and broke the approval logic which matches against known tool names.
+		return base;
 	}
 
 	private async _createClient(serverConfig: MCPConfigFileEntryJSON, serverName: string, isOn = true): Promise<ClientInfo> {

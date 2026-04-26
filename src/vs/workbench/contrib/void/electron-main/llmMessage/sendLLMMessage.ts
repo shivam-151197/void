@@ -108,6 +108,7 @@ export const sendLLMMessage = async ({
 		}
 		const { sendFIM, sendChat } = implementation
 		if (messagesType === 'chatMessages') {
+			console.log(`[Void][sendLLMMessage] Dispatching chat to ${providerName}/${modelName} with ${mcpTools?.length ?? 0} mcpTools: [${mcpTools?.map(t => t.name).join(', ') ?? 'none'}]`);
 			await sendChat({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider, modelSelectionOptions, overridesOfModel, modelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
 			return
 		}

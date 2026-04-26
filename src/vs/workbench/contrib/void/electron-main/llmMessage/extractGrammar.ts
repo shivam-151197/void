@@ -272,8 +272,22 @@ export const extractXMLToolsWrapper = (
 	if (!tools) return { newOnText: onText, newOnFinalMessage: onFinalMessage }
 
 	const toolOfToolName: ToolOfToolName = {}
-	const toolOpenTags = tools.map(t => `<${t.name}>`)
-	for (const t of tools) { toolOfToolName[t.name] = t }
+	const toolOpenTags: string[] = []
+	for (const t of tools) { 
+		toolOfToolName[t.name] = t 
+		toolOpenTags.push(`<${t.name}>`)
+	}
+
+	const toolAliases: Record<string, ToolName> = {
+		'run': 'run_command',
+		'apply_patch': 'edit_file'
+	}
+	for (const alias in toolAliases) {
+		const targetName = toolAliases[alias]
+		if (toolOfToolName[targetName]) {
+			toolOpenTags.push(`<${alias}>`)
+		}
+	}
 
 	const toolId = generateUuid()
 
@@ -282,7 +296,7 @@ export const extractXMLToolsWrapper = (
 	let trueFullText = ''
 	let latestToolCall: RawToolCallObj | undefined = undefined
 
-	let foundOpenTag: { idx: number, toolName: ToolName } | null = null
+	let foundOpenTag: { idx: number, toolName: ToolName, aliasUsed: string } | null = null
 	let openToolTagBuffer = '' // the characters we've seen so far that come after a < with no space afterwards, not yet added to fullText
 
 	let prevFullTextLen = 0
@@ -312,9 +326,10 @@ export const extractXMLToolsWrapper = (
 				const i = findIndexOfAny(fullText, toolOpenTags)
 				if (i !== null) {
 					const [idx, toolTag] = i
-					const toolName = toolTag.substring(1, toolTag.length - 1) as ToolName
+					const rawToolName = toolTag.substring(1, toolTag.length - 1)
+					const toolName = (toolAliases[rawToolName] || rawToolName) as ToolName
 					// console.log('found ', toolName)
-					foundOpenTag = { idx, toolName }
+					foundOpenTag = { idx, toolName, aliasUsed: rawToolName }
 
 					// do not count anything at or after i in fullText
 					fullText = fullText.substring(0, idx)
@@ -326,10 +341,17 @@ export const extractXMLToolsWrapper = (
 
 		// toolTagIdx is not null, so parse the XML
 		if (foundOpenTag !== null) {
+			let parsingString = trueFullText.substring(foundOpenTag.idx, Infinity)
+			if (foundOpenTag.aliasUsed === 'run') {
+				parsingString = parsingString.replace(/<run>/g, '<run_command>').replace(/<\/run>/g, '</run_command>')
+			} else if (foundOpenTag.aliasUsed === 'apply_patch') {
+				parsingString = parsingString.replace(/<apply_patch>/g, '<edit_file>').replace(/<\/apply_patch>/g, '</edit_file>').replace(/<patch>/g, '<search_replace_blocks>').replace(/<\/patch>/g, '</search_replace_blocks>')
+			}
+			
 			latestToolCall = parseXMLPrefixToToolCall(
 				foundOpenTag.toolName,
 				toolId,
-				trueFullText.substring(foundOpenTag.idx, Infinity),
+				parsingString,
 				toolOfToolName,
 			)
 		}

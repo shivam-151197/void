@@ -15,10 +15,14 @@ import { IVoidCommandBarService } from './voidCommandBarService.js'
 import { computeDirectoryTree1Deep, IDirectoryStrService, stringifyDirectoryTree1Deep } from '../common/directoryStrService.js'
 import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js'
 import { timeout } from '../../../../base/common/async.js'
-import { RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
-import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME } from '../common/prompt/prompts.js'
+import { LLMChatMessage, RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
+import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, tripleTick } from '../common/prompt/prompts.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
+import { IVoidIndexService } from '../common/index/indexServiceTypes.js'
+import { IContextGatheringService } from './contextGatheringService.js'
+import { ILLMMessageService } from '../common/sendLLMMessageService.js'
+import { SearchCodebaseParams, SearchCodebaseResultFile, runSearchCodebase } from '../common/contextGathering/searchCodebaseTool.js'
 
 
 // tool use for AI
@@ -35,6 +39,14 @@ const validateStr = (argName: string, value: unknown) => {
 	if (value === null) throw new Error(`Invalid LLM output: ${argName} was null.`)
 	if (typeof value !== 'string') throw new Error(`Invalid LLM output format: ${argName} must be a string, but its type is "${typeof value}". Full value: ${JSON.stringify(value)}.`)
 	return value
+}
+
+const sanitizeSearchCodebaseField = (value: unknown) => {
+	if (typeof value !== 'string') return ''
+	return value
+		.replace(/<[^>]+>/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim()
 }
 
 
@@ -117,6 +129,33 @@ const validateBoolean = (b: unknown, opts: { default: boolean }) => {
 	return opts.default
 }
 
+const summarizeSearchCodebaseCandidatesForLog = (candidates: Awaited<ReturnType<IContextGatheringService['searchCodebaseCandidates']>>) => {
+	return candidates.map(candidate => ({
+		path: candidate.path,
+		totalScore: Math.round(candidate.totalScore * 100) / 100,
+		ripgrepScore: Math.round(candidate.ripgrepScore * 100) / 100,
+		structuralScore: Math.round(candidate.structuralScore * 100) / 100,
+		searchHitCount: candidate.searchHitCount ?? 0,
+		graphHitCount: candidate.graphHitCount ?? 0,
+		callerHitCount: candidate.callerHitCount ?? 0,
+		symbols: candidate.symbols?.map(symbol => symbol.name).slice(0, 8) ?? [],
+		preview: candidate.contentPreview.split('\n').slice(0, 6).join('\n'),
+	}))
+}
+
+const summarizeSearchCodebaseResultForLog = (result: Awaited<ReturnType<typeof runSearchCodebase>>) => ({
+	files: result.files.map(file => ({
+		path: file.path,
+		relevance: file.relevance,
+		reason: file.reason,
+		symbols: file.symbols.slice(0, 8),
+		preview: file.preview.split('\n').slice(0, 6).join('\n'),
+	})),
+	search_summary: result.search_summary,
+	suggested_next: result.suggested_next,
+	error: result.error,
+})
+
 
 const checkIfIsFolder = (uriStr: string) => {
 	uriStr = uriStr.trim()
@@ -153,6 +192,9 @@ export class ToolsService implements IToolsService {
 		@IDirectoryStrService private readonly directoryStrService: IDirectoryStrService,
 		@IMarkerService private readonly markerService: IMarkerService,
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
+		@IVoidIndexService private readonly voidIndexService: IVoidIndexService,
+		@IContextGatheringService private readonly contextGatheringService: IContextGatheringService,
+		@ILLMMessageService private readonly llmMessageService: ILLMMessageService,
 	) {
 		const queryBuilder = instantiationService.createInstance(QueryBuilder);
 
@@ -288,6 +330,29 @@ export class ToolsService implements IToolsService {
 				const { persistent_terminal_id: terminalIdUnknown } = params;
 				const persistentTerminalId = validateProposedTerminalId(terminalIdUnknown);
 				return { persistentTerminalId };
+			},
+			semantic_search: (params: RawToolParamsObj) => {
+				const { query: queryUnknown, limit: limitUnknown } = params
+				const query = validateStr('query', queryUnknown)
+				const limit = validateNumber(limitUnknown, { default: 10 }) ?? 10
+				return { query, limit }
+			},
+			search_codebase: (params: RawToolParamsObj) => {
+				const { query: queryUnknown, search_type: searchTypeUnknown } = params
+				const sanitizedQuery = sanitizeSearchCodebaseField(queryUnknown)
+				if (!sanitizedQuery) throw new Error(`Invalid LLM output format: query must be a non-empty string.`)
+				const query = sanitizedQuery
+				const sanitizedSearchType = sanitizeSearchCodebaseField(searchTypeUnknown).toLowerCase()
+				const rawSearchType = (sanitizedSearchType.split(/\s+/)[0] || 'ownership')
+				const searchType = (
+					rawSearchType === 'implementation' || rawSearchType === 'implemented'
+						? 'ownership'
+						: rawSearchType
+				)
+				if (!['ownership', 'references', 'definition', 'callers'].includes(searchType)) {
+					throw new Error(`Invalid LLM output format: search_type must be one of ownership, references, definition, callers. Got "${searchType}".`)
+				}
+				return { query, searchType: searchType as BuiltinToolCallParams['search_codebase']['searchType'] }
 			},
 
 		}
@@ -461,6 +526,35 @@ export class ToolsService implements IToolsService {
 				await this.terminalToolService.killPersistentTerminal(persistentTerminalId)
 				return { result: {} }
 			},
+			semantic_search: async ({ query, limit }) => {
+				const symbols = await this.voidIndexService.semanticSearch(query, limit)
+				return { result: { symbols } }
+			},
+			search_codebase: async ({ query, searchType }) => {
+				const queryId = generateUuid()
+				const startedAt = Date.now()
+				let loggedCandidates: Awaited<ReturnType<IContextGatheringService['searchCodebaseCandidates']>> = []
+				console.log(`[Void][search_codebase][${queryId}] started query="${query}" searchType=${searchType}`)
+				const result = await runSearchCodebase(
+					{ query, searchType } satisfies SearchCodebaseParams,
+					{
+						getCandidates: async ({ query, searchType }) => {
+							const candidates = await this.contextGatheringService.searchCodebaseCandidates(query, searchType)
+							loggedCandidates = candidates
+							console.log(`[Void][search_codebase][${queryId}] candidates ${JSON.stringify(summarizeSearchCodebaseCandidatesForLog(candidates), null, 2)}`)
+							return candidates
+						},
+						rerankCandidates: ({ systemPrompt, userPrompt }) => this._rerankSearchCodebaseCandidates(systemPrompt, userPrompt),
+					}
+				)
+				console.log(`[Void][search_codebase][${queryId}] completed in ${Date.now() - startedAt}ms ${JSON.stringify({
+					query,
+					searchType,
+					candidateCount: loggedCandidates.length,
+					result: summarizeSearchCodebaseResultForLog(result),
+				}, null, 2)}`)
+				return { result }
+			},
 		}
 
 
@@ -564,10 +658,114 @@ export class ToolsService implements IToolsService {
 			kill_persistent_terminal: (params, _result) => {
 				return `Successfully closed terminal "${params.persistentTerminalId}".`;
 			},
+			semantic_search: (params, result) => {
+				if (result.symbols.length === 0) return 'No relevant symbols found.'
+				return result.symbols
+					.map(s => `Symbol: ${s.name} (${s.type})\nFile: ${s.uri.fsPath}\nRange: ${s.range.startLine}-${s.range.endLine}\nContent:\n${tripleTick[0]}\n${s.text}\n${tripleTick[1]}`)
+					.join('\n\n')
+			},
+			search_codebase: (_params, result) => {
+				if (result.files.length === 0) {
+					return `${result.search_summary}${result.error ? `\nError: ${result.error}` : ''}\nSuggested next: ${result.suggested_next}`
+				}
+				const renderedFiles = result.files
+					.map((file, index) => this._stringifySearchCodebaseFile(index, file))
+					.join('\n\n')
+				return `${result.search_summary}${result.error ? `\nError: ${result.error}` : ''}\n\n${renderedFiles}\n\nSuggested next: ${result.suggested_next}\n\nGROUNDING RULES:\n- Only cite or rank files that appear in the results above unless you first inspect additional files with a tool.\n- Do NOT invent filenames, directories, middleware layers, or services that are not present in the returned results.\n- If you need more certainty, call read_file on one of the returned files before answering.\n- Do NOT repeat the same search_codebase call with identical parameters.`
+			},
 		}
 
 
 
+	}
+
+	private _stringifySearchCodebaseFile(index: number, file: SearchCodebaseResultFile): string {
+		const symbols = file.symbols.length ? file.symbols.join(', ') : '(none)'
+		return `Result ${index + 1}: ${file.path}\nRelevance: ${file.relevance}\nReason: ${file.reason}\nSymbols: ${symbols}\nPreview:\n${tripleTick[0]}\n${file.preview}\n${tripleTick[1]}`
+	}
+
+	private async _rerankSearchCodebaseCandidates(systemPrompt: string, userPrompt: string): Promise<string | null> {
+		const modelName = await this._selectSearchCodebaseModel()
+		if (!modelName) return null
+
+		return new Promise<string | null>((resolve) => {
+			let settled = false
+			let requestId: string | null = null
+
+			const settle = (value: string | null) => {
+				if (settled) return
+				settled = true
+				resolve(value)
+			}
+
+			timeout(8_000).then(() => {
+				if (requestId) {
+					this.llmMessageService.abort(requestId)
+				}
+				settle(null)
+			})
+
+			const messages: LLMChatMessage[] = [{ role: 'user', content: userPrompt }]
+			requestId = this.llmMessageService.sendLLMMessage({
+				messagesType: 'chatMessages',
+				messages,
+				separateSystemMessage: systemPrompt,
+				chatMode: null,
+				modelSelection: { providerName: 'localProxy', modelName },
+				modelSelectionOptions: undefined,
+				overridesOfModel: undefined,
+				onText: () => { },
+				onFinalMessage: ({ fullText }) => settle(fullText),
+				onError: () => settle(null),
+				onAbort: () => settle(null),
+				logging: { loggingName: 'Tool - search_codebase reranker', loggingExtras: { modelName } },
+			})
+
+			if (!requestId) {
+				settle(null)
+			}
+		})
+	}
+
+	private async _selectSearchCodebaseModel(): Promise<string | null> {
+		const models = await new Promise<string[] | null>((resolve) => {
+			let settled = false
+
+			const settle = (value: string[] | null) => {
+				if (settled) return
+				settled = true
+				resolve(value)
+			}
+
+			timeout(3_000).then(() => settle(null))
+			this.llmMessageService.openAICompatibleList({
+				providerName: 'localProxy',
+				onSuccess: ({ models }) => settle(models.map(model => model.id)),
+				onError: () => settle(null),
+			})
+		})
+
+		if (!models?.length) return null
+
+		const preferredModels = [
+			'gpt-4o-mini',
+			'gemini-2.0-flash-lite',
+			'gemini-2.0-flash',
+			'gemini-2.5-flash-preview-04-17',
+			'grok-4-1-fast-reasoning',
+			'claude-3-5-haiku-latest',
+			'claude-sonnet-4-5',
+			'gpt-5-chat',
+			'gpt-5.3-codex',
+			'gemini-2.5-pro',
+			'gpt-5.4-pro',
+		]
+
+		for (const modelName of preferredModels) {
+			if (models.includes(modelName)) return modelName
+		}
+
+		return models[0] ?? null
 	}
 
 

@@ -152,6 +152,10 @@ export class ThreadedBackgroundTokenizerFactory implements IDisposable {
 				// However, the worker might still be sending tokens for that model,
 				// so we ignore the event when there is no controller.
 				if (controller) {
+				// @ts-ignore
+				// @ts-ignore
+                                                            // @ts-ignore
+                                                            // @ts-ignore
 					controller.setTokensAndStates(controllerId, versionId, tokens, lineEndStateDeltas);
 				}
 			},

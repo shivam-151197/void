@@ -238,5 +238,7 @@ export interface MCPToolCallParams {
 
 
 export const removeMCPToolNamePrefix = (name: string) => {
-	return name.split('_').slice(1).join('_')
+	// No-op: we no longer add random prefixes to tool names.
+	// Returning name unchanged preserves tool names like file_glob_search.
+	return name
 }

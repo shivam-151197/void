@@ -10,6 +10,17 @@ import { InstantiationType, registerSingleton } from '../../../../platform/insta
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import { URI } from '../../../../base/common/uri.js';
+import { ISearchService, QueryType, isFileMatch, resultIsMatch } from '../../../services/search/common/search.js';
+import { IAiEmbeddingVectorService } from '../../../services/aiEmbeddingVector/common/aiEmbeddingVectorService.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { IVoidModelService } from '../common/voidModelService.js';
+import { IDirectoryStrService } from '../common/directoryStrService.js';
+import { EndOfLinePreference } from '../../../../editor/common/model.js';
+import { QueryBuilder } from '../../../services/search/common/queryBuilder.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { GatheredContext, GatherContextFileInput, GatherContextSymbol, SearchCodebaseCandidate, SearchCodebaseSearchType, extractContextTerms, extractSearchCodebaseAnchors, extractSearchCodebaseTerms, gatherContextFromInputs, rankSearchCodebaseCandidates } from '../common/contextGathering/contextGatherer.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { IndexedContextNeighborhood, IVoidIndexService } from '../common/index/indexServiceTypes.js';
 
 
 // make sure snippet logic works
@@ -27,6 +38,9 @@ export interface IContextGatheringService {
 	readonly _serviceBrand: undefined;
 	updateCache(model: ITextModel, pos: Position): Promise<void>;
 	getCachedSnippets(): string[];
+	getSemanticSnippets(query: string): Promise<string[]>;
+	gatherContext(task: string, workspaceRoot?: URI): Promise<GatheredContext>;
+	searchCodebaseCandidates(query: string, searchType: SearchCodebaseSearchType, workspaceRoot?: URI): Promise<SearchCodebaseCandidate[]>;
 }
 
 export const IContextGatheringService = createDecorator<IContextGatheringService>('contextGatheringService');
@@ -42,7 +56,15 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 	constructor(
 		@ILanguageFeaturesService private readonly _langFeaturesService: ILanguageFeaturesService,
 		@IModelService private readonly _modelService: IModelService,
-		@ICodeEditorService private readonly _codeEditorService: ICodeEditorService
+		@ICodeEditorService private readonly _codeEditorService: ICodeEditorService,
+		@ISearchService private readonly _searchService: ISearchService,
+		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+		@IDirectoryStrService private readonly _directoryStrService: IDirectoryStrService,
+		@IAiEmbeddingVectorService private readonly _aiEmbeddingVectorService: IAiEmbeddingVectorService,
+		@IVoidModelService private readonly _voidModelService: IVoidModelService,
+		@IFileService private readonly _fileService: IFileService,
+		@IVoidIndexService private readonly _voidIndexService: IVoidIndexService,
 	) {
 		super();
 		this._modelService.getModels().forEach(model => this._subscribeToModel(model));
@@ -77,6 +99,395 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 
 	public getCachedSnippets(): string[] {
 		return this._cache;
+	}
+
+	public async getSemanticSnippets(query: string): Promise<string[]> {
+		const searchStart = Date.now();
+		console.log(`Void: Performing semantic search for: ${query}`);
+		if (!this._aiEmbeddingVectorService.isEnabled()) {
+			console.log(`Void: Semantic search skipped because embeddings are disabled (${Date.now() - searchStart}ms).`);
+			return [];
+		}
+
+		try {
+			const results = await this._searchService.aiTextSearch({
+				contentPattern: query,
+				type: QueryType.aiText,
+				folderQueries: this._workspaceContextService.getWorkspace().folders.map(f => ({ folder: f.uri })),
+				maxResults: 10
+			}, CancellationToken.None);
+
+			const snippets: string[] = [];
+			for (const result of results.results) {
+				if (isFileMatch(result)) {
+					const { model } = await this._voidModelService.getModelSafe(result.resource);
+					if (model) {
+						for (const searchResult of result.results || []) {
+							if (resultIsMatch(searchResult)) {
+								const range = searchResult.rangeLocations[0].source;
+								const snippet = this._getSnippetForRange(model, range, 2);
+								snippets.push(`File: ${result.resource.fsPath}\n${snippet}`);
+							}
+						}
+					}
+				}
+			}
+			console.log(`Void: Found ${snippets.length} semantic snippets in ${Date.now() - searchStart}ms.`);
+			return snippets;
+		} catch (e) {
+			console.error(`Semantic search error after ${Date.now() - searchStart}ms:`, e);
+			return [];
+		}
+	}
+
+	public async gatherContext(task: string, workspaceRoot?: URI): Promise<GatheredContext> {
+		const workspaceFolders = workspaceRoot
+			? [workspaceRoot]
+			: this._workspaceContextService.getWorkspace().folders.map(folder => folder.uri);
+		const roots = workspaceFolders.filter(Boolean);
+		if (!roots.length) {
+			return gatherContextFromInputs(task, []);
+		}
+
+		const fileUris = await this._collectWorkspaceFiles(roots);
+		const searchHitCounts = await this._collectSearchHitCounts(task, roots);
+		const initialFiles = fileUris.map(uri => ({
+			path: this._relativePath(uri, roots),
+			searchHitCount: searchHitCounts.get(uri.toString()) ?? 0,
+		} satisfies GatherContextFileInput));
+
+		const initialContext = gatherContextFromInputs(task, initialFiles, {
+			maxFullContentFiles: 0,
+			maxRelevantFiles: 8,
+		});
+		const candidatePaths = new Set(initialContext.relevantFiles.map(file => file.path));
+		if (candidatePaths.size === 0) {
+			for (const file of initialFiles) {
+				if ((file.searchHitCount ?? 0) > 0) {
+					candidatePaths.add(file.path);
+				}
+				if (candidatePaths.size >= 8) {
+					break;
+				}
+			}
+		}
+
+		const enrichedFiles = await Promise.all(initialFiles.map(async file => {
+			if (!candidatePaths.has(file.path)) {
+				return file;
+			}
+
+			const uri = fileUris.find(candidateUri => this._relativePath(candidateUri, roots) === file.path);
+			if (!uri) {
+				return file;
+			}
+
+			const { content, symbols } = await this._readContextFile(uri);
+			return {
+				...file,
+				content,
+				symbols,
+			};
+		}));
+
+		return gatherContextFromInputs(task, enrichedFiles, {
+			maxFileTreeEntries: 1000,
+			maxRelevantFiles: 8,
+			maxFullContentFiles: 3,
+			maxContentChars: 20000,
+		});
+	}
+
+	public async searchCodebaseCandidates(query: string, searchType: SearchCodebaseSearchType, workspaceRoot?: URI): Promise<SearchCodebaseCandidate[]> {
+		const workspaceFolders = workspaceRoot
+			? [workspaceRoot]
+			: this._workspaceContextService.getWorkspace().folders.map(folder => folder.uri);
+		const roots = workspaceFolders.filter(Boolean);
+		if (!roots.length) {
+			return [];
+		}
+
+		const fileUris = await this._collectWorkspaceFiles(roots);
+		const searchTerms = extractSearchCodebaseTerms(query);
+		const searchHitCounts = await this._collectSearchHitCountsFromTerms(searchTerms, roots);
+		const neighborhoods = await this._collectContextNeighborhoods(query, searchType, roots);
+		const neighborhoodsByUri = new Map(neighborhoods.map(neighborhood => [neighborhood.uri.toString(), neighborhood] as const));
+		const callerHitCounts = searchType === 'callers'
+			? await this._collectCallerHitCounts(query, roots)
+			: new Map<string, number>();
+		const initialFiles = fileUris.map(uri => ({
+			path: this._relativePath(uri, roots),
+			searchHitCount: searchHitCounts.get(uri.toString()) ?? 0,
+			graphHitCount: neighborhoodsByUri.get(uri.toString())?.score ?? 0,
+			callerHitCount: callerHitCounts.get(uri.toString()) ?? 0,
+		} satisfies GatherContextFileInput));
+
+		const topStaticCandidates = rankSearchCodebaseCandidates(query, initialFiles, {
+			searchType,
+			maxCandidates: 20,
+		});
+
+		const uriByRelativePath = new Map(fileUris.map(uri => [this._relativePath(uri, roots), uri] as const));
+		const enrichedFiles = await Promise.all(topStaticCandidates.map(async candidate => {
+			const uri = uriByRelativePath.get(candidate.path);
+			if (!uri) {
+				return candidate;
+			}
+
+			const { content, symbols } = await this._readContextFile(uri, 300);
+			const neighborhood = neighborhoodsByUri.get(uri.toString());
+			const contextSummary = neighborhood ? this._formatNeighborhoodSummary(candidate.path, neighborhood, roots) : undefined;
+			const importCount = content ? this._countImportStatements(content) : 0;
+			const importedByCount = await this._countImportFanOut(candidate.path, roots);
+			const modifiedTimeMs = await this._getModifiedTimeMs(uri);
+			return {
+				path: candidate.path,
+				content,
+				contextSummary,
+				symbols,
+				searchHitCount: candidate.searchHitCount,
+				graphHitCount: candidate.graphHitCount,
+				callerHitCount: candidate.callerHitCount,
+				importCount,
+				importedByCount,
+				modifiedTimeMs,
+				lineCount: content ? content.split('\n').length : 0,
+			} satisfies GatherContextFileInput;
+		}));
+
+		return rankSearchCodebaseCandidates(query, enrichedFiles, {
+			searchType,
+			maxCandidates: 8,
+		});
+	}
+
+	private async _collectWorkspaceFiles(roots: URI[]): Promise<URI[]> {
+		const allUris: URI[] = [];
+		for (const root of roots) {
+			try {
+				const uris = await this._directoryStrService.getAllURIsInDirectory(root, { maxResults: 5000 });
+				allUris.push(...uris);
+			} catch (e) {
+				console.warn('Void: gatherContext failed to enumerate workspace files:', e);
+			}
+		}
+		return allUris;
+	}
+
+	private async _collectSearchHitCounts(task: string, roots: URI[]): Promise<Map<string, number>> {
+		const terms = extractContextTerms(task);
+		return this._collectSearchHitCountsFromTerms(terms, roots);
+	}
+
+	private async _collectSearchHitCountsFromTerms(terms: string[], roots: URI[]): Promise<Map<string, number>> {
+		const hitCounts = new Map<string, number>();
+		if (terms.length === 0) {
+			return hitCounts;
+		}
+
+		try {
+			const queryBuilder = this._instantiationService.createInstance(QueryBuilder);
+			const pattern = terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+			const query = queryBuilder.text({
+				pattern,
+				isRegExp: true,
+			}, roots);
+			const results = await this._searchService.textSearch(query, CancellationToken.None);
+			for (const result of results.results) {
+				if (!isFileMatch(result)) {
+					continue;
+				}
+				hitCounts.set(result.resource.toString(), result.results?.length ?? 1);
+			}
+		} catch (e) {
+			console.warn('Void: gatherContext text search failed:', e);
+		}
+
+		return hitCounts;
+	}
+
+	private async _collectContextNeighborhoods(query: string, searchType: SearchCodebaseSearchType, roots: URI[]): Promise<IndexedContextNeighborhood[]> {
+		try {
+			const neighborhoods = await this._voidIndexService.getContextNeighborhoods(query, { intent: searchType, limit: 12 });
+			return neighborhoods.filter(neighborhood => roots.some(root => neighborhood.uri.toString().startsWith(root.toString())));
+		} catch (e) {
+			console.warn('Void: neighborhood index search failed:', e);
+			return [];
+		}
+	}
+
+	private async _collectCallerHitCounts(query: string, roots: URI[]): Promise<Map<string, number>> {
+		const hitCounts = new Map<string, number>();
+		const anchors = extractSearchCodebaseAnchors(query).slice(0, 3);
+		if (anchors.length === 0) {
+			return hitCounts;
+		}
+
+		try {
+			const results = await Promise.all(anchors.map(anchor => this._voidIndexService.searchCallers(anchor)));
+			for (const symbols of results) {
+				for (const symbol of symbols) {
+					const uri = URI.parse(symbol.uri.toString());
+					if (!roots.some(root => uri.toString().startsWith(root.toString()))) {
+						continue;
+					}
+					hitCounts.set(uri.toString(), (hitCounts.get(uri.toString()) ?? 0) + 4);
+				}
+			}
+		} catch (e) {
+			console.warn('Void: caller index search failed:', e);
+		}
+
+		return hitCounts;
+	}
+
+	private async _readContextFile(uri: URI, maxLines?: number): Promise<{ content: string | null; symbols: GatherContextSymbol[] }> {
+		try {
+			await this._voidModelService.initializeModel(uri);
+			const { model } = await this._voidModelService.getModelSafe(uri);
+			if (!model) {
+				return { content: null, symbols: [] };
+			}
+
+			const content = maxLines && model.getLineCount() > maxLines
+				? model.getValueInRange({
+					startLineNumber: 1,
+					startColumn: 1,
+					endLineNumber: maxLines,
+					endColumn: model.getLineMaxColumn(maxLines),
+				}, EndOfLinePreference.LF)
+				: model.getValue(EndOfLinePreference.LF);
+			const symbols = await this._getContextSymbols(model);
+			return { content, symbols };
+		} catch (e) {
+			console.warn('Void: gatherContext failed to read candidate file:', e);
+			return { content: null, symbols: [] };
+		}
+	}
+
+	private async _getContextSymbols(model: ITextModel): Promise<GatherContextSymbol[]> {
+		const providers = this._langFeaturesService.documentSymbolProvider.ordered(model);
+		for (const provider of providers) {
+			try {
+				const result = await provider.provideDocumentSymbols(model, CancellationToken.None);
+				if (!result) {
+					continue;
+				}
+				return this._flattenSymbols(result)
+					.filter(symbol => this._isUsefulContextSymbol(symbol))
+					.slice(0, 50)
+					.map(symbol => ({
+						name: symbol.name,
+						kind: this._symbolKindLabel(symbol.kind),
+						range: {
+							startLine: symbol.range.startLineNumber,
+							endLine: symbol.range.endLineNumber,
+						},
+					}));
+			} catch (e) {
+				console.warn('Void: gatherContext symbol provider error:', e);
+			}
+		}
+		return [];
+	}
+
+	private _countImportStatements(content: string): number {
+		return (content.match(/\bimport\s+(?:type\s+)?(?:[^'"]+?\s+from\s+)?['"][^'"]+['"]/g) ?? []).length
+			+ (content.match(/\brequire\(\s*['"][^'"]+['"]\s*\)/g) ?? []).length
+			+ (content.match(/\bexport\s+[^'"]*?\s+from\s+['"][^'"]+['"]/g) ?? []).length;
+	}
+
+	private async _countImportFanOut(relativePath: string, roots: URI[]): Promise<number> {
+		const basename = relativePath.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '');
+		if (!basename) {
+			return 0;
+		}
+
+		try {
+			const queryBuilder = this._instantiationService.createInstance(QueryBuilder);
+			const query = queryBuilder.text({
+				pattern: `\\b${basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+				isRegExp: true,
+			}, roots);
+			const results = await this._searchService.textSearch(query, CancellationToken.None);
+			return results.results.filter(result => isFileMatch(result)).length;
+		} catch (e) {
+			console.warn('Void: searchCodebase import fan-out search failed:', e);
+			return 0;
+		}
+	}
+
+	private async _getModifiedTimeMs(uri: URI): Promise<number | undefined> {
+		try {
+			const stat = await this._fileService.stat(uri);
+			return stat.mtime;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private _formatNeighborhoodSummary(path: string, neighborhood: IndexedContextNeighborhood, roots: URI[]): string {
+		const anchorSummary = neighborhood.anchorNodes
+			.slice(0, 4)
+			.map(node => `${node.name} [${node.role ?? node.type}]`)
+			.join(', ');
+		const relatedSummary = neighborhood.relatedNodes
+			.slice(0, 6)
+			.map(node => {
+				const relativePath = this._relativePath(node.uri, roots);
+				return relativePath === path ? `${node.name} [${node.role ?? node.type}]` : `${node.name} -> ${relativePath}`;
+			})
+			.join(', ');
+		const edgeSummary = neighborhood.edges
+			.slice(0, 8)
+			.map(edge => `${edge.type}:${edge.targetName ?? edge.targetId ?? edge.targetUri?.toString() ?? 'unknown'}`)
+			.join(', ');
+
+		return [
+			`Context neighborhood score: ${Math.round(neighborhood.score)}`,
+			anchorSummary ? `Anchors: ${anchorSummary}` : '',
+			relatedSummary ? `Related: ${relatedSummary}` : '',
+			edgeSummary ? `Edges: ${edgeSummary}` : '',
+		].filter(Boolean).join('\n');
+	}
+
+	private _relativePath(uri: URI, roots: URI[]): string {
+		const path = uri.fsPath.replace(/\\/g, '/');
+		for (const root of roots) {
+			const rootPath = root.fsPath.replace(/\\/g, '/').replace(/\/+$/, '');
+			if (path === rootPath) {
+				return path.split('/').pop() ?? path;
+			}
+			if (path.startsWith(rootPath + '/')) {
+				return path.slice(rootPath.length + 1);
+			}
+		}
+		return path;
+	}
+
+	private _isUsefulContextSymbol(symbol: DocumentSymbol): boolean {
+		return symbol.kind === SymbolKind.Function ||
+			symbol.kind === SymbolKind.Method ||
+			symbol.kind === SymbolKind.Class ||
+			symbol.kind === SymbolKind.Interface ||
+			symbol.kind === SymbolKind.Enum ||
+			symbol.kind === SymbolKind.Constructor ||
+			symbol.kind === SymbolKind.Module ||
+			symbol.kind === SymbolKind.Namespace;
+	}
+
+	private _symbolKindLabel(kind: SymbolKind): string {
+		switch (kind) {
+			case SymbolKind.Function: return 'function';
+			case SymbolKind.Method: return 'method';
+			case SymbolKind.Class: return 'class';
+			case SymbolKind.Interface: return 'interface';
+			case SymbolKind.Enum: return 'enum';
+			case SymbolKind.Constructor: return 'constructor';
+			case SymbolKind.Module: return 'module';
+			case SymbolKind.Namespace: return 'namespace';
+			default: return 'symbol';
+		}
 	}
 
 	// Basic snippet extraction.

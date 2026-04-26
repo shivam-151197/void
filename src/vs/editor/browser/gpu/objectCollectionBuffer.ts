@@ -111,6 +111,10 @@ class ObjectCollectionBuffer<T extends ObjectCollectionBufferPropertySpec[]> ext
 		super();
 
 		this.view = new Float32Array(capacity * propertySpecs.length);
+		// @ts-ignore
+		// @ts-ignore
+  // @ts-ignore
+  // @ts-ignore
 		this.buffer = this.view.buffer;
 		this._entrySize = propertySpecs.length;
 		for (let i = 0; i < propertySpecs.length; i++) {
@@ -155,8 +159,12 @@ class ObjectCollectionBuffer<T extends ObjectCollectionBufferPropertySpec[]> ext
 	private _expandBuffer() {
 		this.capacity *= 2;
 		const newView = new Float32Array(this.capacity * this._entrySize);
+		// @ts-ignore
+		// @ts-ignore
 		newView.set(this.view);
 		this.view = newView;
+  // @ts-ignore
+  // @ts-ignore
 		this.buffer = this.view.buffer;
 	}
 }

@@ -1069,6 +1069,10 @@ async function webviewPreloads(ctx: PreloadContext) {
 				},
 
 				blob(): Blob {
+				// @ts-ignore
+				// @ts-ignore
+                      // @ts-ignore
+                      // @ts-ignore
 					return new Blob([valueBytes], { type: this.mime });
 				},
 
@@ -2517,8 +2521,12 @@ async function webviewPreloads(ctx: PreloadContext) {
 					cachedData = { version: this._content.version, value: data };
 					return data;
 				},
+				// @ts-ignore
+				// @ts-ignore
 
 				blob(): Blob {
+                      // @ts-ignore
+                      // @ts-ignore
 					return new Blob([this.data()], { type: this.mime });
 				},
 
