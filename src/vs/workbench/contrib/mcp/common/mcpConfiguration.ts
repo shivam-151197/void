@@ -27,6 +27,7 @@ export const enum DiscoverySource {
 	Windsurf = 'windsurf',
 	CursorGlobal = 'cursor-global',
 	CursorWorkspace = 'cursor-workspace',
+	VoidGlobal = 'void-global',
 }
 
 export const allDiscoverySources = Object.keys({
@@ -34,6 +35,7 @@ export const allDiscoverySources = Object.keys({
 	[DiscoverySource.Windsurf]: true,
 	[DiscoverySource.CursorGlobal]: true,
 	[DiscoverySource.CursorWorkspace]: true,
+	[DiscoverySource.VoidGlobal]: true,
 } satisfies Record<DiscoverySource, true>) as DiscoverySource[];
 
 export const discoverySourceLabel: Record<DiscoverySource, string> = {
@@ -41,6 +43,7 @@ export const discoverySourceLabel: Record<DiscoverySource, string> = {
 	[DiscoverySource.Windsurf]: localize('mcp.discovery.source.windsurf', "Windsurf"),
 	[DiscoverySource.CursorGlobal]: localize('mcp.discovery.source.cursor-global', "Cursor (Global)"),
 	[DiscoverySource.CursorWorkspace]: localize('mcp.discovery.source.cursor-workspace', "Cursor (Workspace)"),
+	[DiscoverySource.VoidGlobal]: localize('mcp.discovery.source.void-global', "Void (Global)"),
 };
 
 export const mcpConfigurationSection = 'mcp';

@@ -3,8 +3,7 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
 
-import { execSync } from 'child_process';
-import { spawn } from 'cross-spawn'
+import { execSync, spawn } from 'child_process';
 // Added lines below
 import fs from 'fs';
 import path from 'path';
@@ -12,6 +11,15 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Add root node_modules/.bin to PATH
+const rootBinPath = path.resolve(__dirname, '../../../../../../../node_modules/.bin');
+console.log('Root Bin Path:', rootBinPath);
+if (!fs.existsSync(rootBinPath)) {
+	console.error('❌ Root bin path does not exist!');
+}
+process.env.PATH = `${rootBinPath}${path.delimiter}${process.env.PATH}`;
+console.log('PATH updated to include root bin.');
 
 function doesPathExist(filePath) {
 	try {
@@ -145,10 +153,10 @@ if (isWatch) {
 	console.log('📦 Building...');
 
 	// Run scope-tailwind once
-	execSync('npx scope-tailwind ./src -o src2/ -s void-scope -c styles.css -p "void-"', { stdio: 'inherit' });
+	execSync('npx -y scope-tailwind ./src -o src2/ -s void-scope -c styles.css -p "void-"', { stdio: 'inherit' });
 
 	// Run tsup once
-	execSync('npx tsup', { stdio: 'inherit' });
+	execSync('npx -y tsup', { stdio: 'inherit' });
 
 	console.log('✅ Build complete!');
 }

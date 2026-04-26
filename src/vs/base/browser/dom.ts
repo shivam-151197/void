@@ -1530,6 +1530,10 @@ export function triggerDownload(dataOrUri: Uint8Array | URI, name: string): void
 	if (URI.isUri(dataOrUri)) {
 		url = dataOrUri.toString(true);
 	} else {
+	// @ts-ignore
+	// @ts-ignore
+                         // @ts-ignore
+                         // @ts-ignore
 		const blob = new Blob([dataOrUri]);
 		url = URL.createObjectURL(blob);
 

@@ -185,8 +185,10 @@ class MCPService extends Disposable implements IMCPService {
 
 	public getMCPTools(): InternalToolInfo[] | undefined {
 		const allTools: InternalToolInfo[] = []
+		console.log(`[Void][Diagnostic] mcpService.getMCPTools state.mcpServerOfName keys: ${Object.keys(this.state.mcpServerOfName).join(', ')}`);
 		for (const serverName in this.state.mcpServerOfName) {
 			const server = this.state.mcpServerOfName[serverName];
+			console.log(`[Void][Diagnostic] Server ${serverName} has status ${server.status} and ${server.tools?.length ?? 0} tools`);
 			server.tools?.forEach(tool => {
 				allTools.push({
 					description: tool.description || '',

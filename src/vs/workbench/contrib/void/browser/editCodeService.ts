@@ -1615,7 +1615,7 @@ class EditCodeService extends Disposable implements IEditCodeService {
 
 	private _instantlyApplySRBlocks(uri: URI, blocksStr: string) {
 		const blocks = extractSearchReplaceBlocks(blocksStr)
-		if (blocks.length === 0) throw new Error(`No Search/Replace blocks were received!`)
+		if (blocks.length === 0) throw new Error(`No Search/Replace blocks were received! You likely used an invalid format (like "@@" diffs or markdown). You MUST use the exact boundary markers: <<<<<<< ORIGINAL, =======, and >>>>>>> UPDATED. Please try again with the correct syntax.`)
 
 		const { model } = this._voidModelService.getModel(uri)
 		if (!model) throw new Error(`Error applying Search/Replace blocks: File does not exist.`)

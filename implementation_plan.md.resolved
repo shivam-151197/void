@@ -1,0 +1,57 @@
+# Project Context Embeddings Integration
+
+Integrate project context embeddings into the Void editor using the local proxy's `/v1/embeddings` endpoint. This will enable semantic search and enhance the existing "functional semantic graph" for better code context.
+
+## Proposed Changes
+
+### Common Layer
+
+#### [MODIFY] [sendLLMMessageTypes.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageTypes.ts)
+- Add [EmbeddingsParams](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageTypes.ts#220-227) and `EmbeddingsResponse` types for IPC-based embedding requests.
+- Add [MainEmbeddingsParams](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageTypes.ts#236-237) and [EventEmbeddingsOnSuccessParams](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageTypes.ts#238-239) for IPC event handling.
+
+#### [MODIFY] [sendLLMMessageService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageService.ts)
+- Add [getEmbeddings](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts#984-985) method to [ILLMMessageService](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageService.ts#21-29) to bridge the frontend and backend for embedding requests.
+
+---
+
+### Electron-Main Layer
+
+#### [MODIFY] [sendLLMMessageChannel.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/sendLLMMessageChannel.ts)
+- Add [getEmbeddings](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts#984-985) command to the IPC channel to handle requests from the browser.
+- Emit `onSuccess_embeddings` and `onError_embeddings` events back to the browser.
+
+#### [MODIFY] [sendLLMMessage.impl.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts)
+- Implement [_sendOpenAICompatibleEmbeddings](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts#429-447) to call the local proxy's `/v1/embeddings` endpoint.
+- Register this implementation in `sendLLMMessageToProviderImplementation`.
+
+---
+
+### Browser Layer
+
+#### [NEW] [voidEmbeddingProvider.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/voidEmbeddingProvider.ts)
+- Implement [IAiEmbeddingVectorProvider](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.ts#25-28) using the `ILLMMessageService.getEmbeddings` method.
+- Register the provider with VS Code's [IAiEmbeddingVectorService](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.ts#16-24).
+
+#### [MODIFY] [contextGatheringService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/contextGatheringService.ts)
+- Integrate semantic retrieval using the embedding provider to supplement the existing graph-based context.
+
+## Verification Plan
+
+### Automated Tests
+- Verify embedding retrieval via a script that calls `ILLMMessageService.getEmbeddings`.
+- Test IPC communication by triggering an embedding request from the developer console.
+
+### Manual Verification
+- Check that the local proxy logs record requests to `/v1/embeddings` when the chat mode is set to "gather".
+- Verify that semantic context (Snippets) are included in the LLM prompt.
+
+## Observability & Verification
+
+To ensure the system is working, I will add prominent logging:
+- **Embedding Heartbeat**: Log "Void: Creating embedding for [text...]" in `VoidEmbeddingProvider.ts`.
+- **Semantic Search Heartbeat**: Log "Void: Performing semantic search for: [query]" and "Void: Found [N] snippets" in `ContextGatheringService.ts`.
+
+These logs will be visible in:
+1. The **terminal** where you run [./scripts/code.sh](file:///home/shivam/Desktop/Shivam/void/scripts/code.sh).
+2. The **Developer Tools Console** (Help -> Toggle Developer Tools).

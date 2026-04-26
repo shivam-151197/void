@@ -213,3 +213,29 @@ export type EventModelListOnErrorParams<modelResponse> = Parameters<ModelListPar
 
 
 
+
+// --- Embeddings ---
+
+// params to the true embeddings fn
+export type EmbeddingsParams = {
+	providerName: ProviderName;
+	settingsOfProvider: SettingsOfProvider;
+	modelName?: string;
+	text: string | string[];
+	onSuccess: (param: { embeddings: number[][] }) => void;
+	onError: (param: { error: string }) => void;
+}
+
+// params to the service
+export type ServiceEmbeddingsParams = {
+	modelName?: string;
+	text: string | string[];
+	onSuccess: (param: { embeddings: number[][] }) => void;
+	onError: (param: { error: any }) => void;
+}
+
+type BlockedMainEmbeddingsParams = 'onSuccess' | 'onError'
+export type MainEmbeddingsParams = Omit<EmbeddingsParams, BlockedMainEmbeddingsParams> & { requestId: string }
+
+export type EventEmbeddingsOnSuccessParams = { embeddings: number[][], requestId: string }
+export type EventEmbeddingsOnErrorParams = { error: string, requestId: string }

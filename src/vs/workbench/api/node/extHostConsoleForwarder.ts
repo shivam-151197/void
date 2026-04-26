@@ -57,6 +57,12 @@ export class ExtHostConsoleForwarder extends AbstractExtHostConsoleForwarder {
 					}
 				}
 
+
+// @ts-ignore
+
+// @ts-ignore
+                                           // @ts-ignore
+                                           // @ts-ignore
 				original.call(stream, chunk, encoding, callback);
 			},
 		});

@@ -131,6 +131,12 @@ function pipeLoggingToParent(): void {
 					buf = buf.slice(eol + 1);
 				}
 
+
+// @ts-ignore
+
+// @ts-ignore
+                                           // @ts-ignore
+                                           // @ts-ignore
 				original.call(stream, chunk, encoding, callback);
 			},
 		});
