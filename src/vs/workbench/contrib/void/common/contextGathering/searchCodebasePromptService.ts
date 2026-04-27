@@ -11,17 +11,28 @@ export type SearchCodebaseRerankerPrompt = {
 	userPrompt: string;
 };
 
-const rerankerSystemPrompt = `You are a code ownership analyzer. Your only job is to rank files by how likely
-they are to be the source of truth for the given task.
+export type SearchCodebaseExpansionPrompt = {
+	systemPrompt: string;
+	userPrompt: string;
+};
 
+const rerankerSystemPrompt = `Code Ownership Analyst.
 Rules:
-- Return ONLY valid JSON. No explanation before or after.
-- Rank by ownership probability, not by keyword frequency.
-- A file that IMPLEMENTS behavior ranks higher than a file that CALLS it.
-- A file that DEFINES a type ranks higher than a file that USES the type.
-- Consider the search_type: for "ownership" prefer implementation files;
-  for "callers" prefer files that import/use the symbol; for "definition"
-  prefer files where the symbol is first declared.`;
+1. MASTER OVER SLAVE: Prioritize implementations/registrations over consumers.
+2. DEFINITION OVER USAGE: Prioritize declarations over imports.
+3. FUNCTIONAL EVIDENCE: Prioritize actionable symbols (registry.register, service.auth) over comments/tests.
+4. NO HALLUCINATIONS: Use ONLY provided symbols/evidence. Do not assume project structure.
+5. CITATION: Cite specific symbols in 'reason'.
+Return ONLY JSON.`;
+
+const expansionSystemPrompt = `Code Search Query Expander.
+Role: Expand a natural language query into 5-8 technical keywords likely to appear in source code (filenames, symbols, terms).
+Rules:
+1. No generalities (implementation, code, function).
+2. Use technical synonyms (auth -> login, jwt, token, identity).
+3. Use common abbreviations (callback -> cb, configuration -> config).
+4. Predict symbols (service, router, controller).
+Return ONLY a comma-separated list of keywords.`;
 
 const trimPreview = (preview: string): string => preview.trim().split('\n').slice(0, 20).join('\n').trim();
 
@@ -67,9 +78,19 @@ Return this exact JSON:
       "reason": "one sentence why"
     }
   ],
-  "suggested_next": "one sentence: what to search for if these are wrong"
+  "suggested_next": "Optional (one sentence): only if these results are insufficient"
 }
 
-Return at most 6 items. Do not include any text outside the JSON object.`,
+Return at most 8 items. Do not include any text outside the JSON object.`,
+	};
+};
+
+export const buildSearchCodebaseExpansionPrompt = (
+	params: SearchCodebaseParams,
+): SearchCodebaseExpansionPrompt => {
+	return {
+		systemPrompt: expansionSystemPrompt,
+		userPrompt: `Query: ${params.query}
+Keywords:`,
 	};
 };

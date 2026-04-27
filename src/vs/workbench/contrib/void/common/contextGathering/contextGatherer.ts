@@ -14,6 +14,7 @@ export interface GatherContextSymbol {
 
 export interface GatherContextFileInput {
 	path: string;
+	uri?: string;
 	content?: string | null;
 	contextSummary?: string | null;
 	symbols?: GatherContextSymbol[];
@@ -206,14 +207,21 @@ const hasAnyTerm = (haystack: string, needles: string[]): boolean => needles.som
 
 const getImportSpecifiers = (content: string): string[] => {
 	const specifiers = new Set<string>();
-	for (const match of content.matchAll(/\bimport\s+(?:type\s+)?(?:[^'"]+?\s+from\s+)?['"]([^'"]+)['"]/g)) {
+	// TS/JS imports
+	for (const match of content.matchAll(/\b(?:import|export)\s+(?:type\s+)?(?:[^'"]+?\s+from\s+)?['"]([^'"]+)['"]/g)) {
 		specifiers.add(match[1]);
 	}
-	for (const match of content.matchAll(/\bexport\s+[^'"]*?\s+from\s+['"]([^'"]+)['"]/g)) {
-		specifiers.add(match[1]);
-	}
+	// CommonJS
 	for (const match of content.matchAll(/\brequire\(\s*['"]([^'"]+)['"]\s*\)/g)) {
 		specifiers.add(match[1]);
+	}
+	// Python imports
+	for (const match of content.matchAll(/\b(?:from|import)\s+([A-Za-z0-9_.]+)(?:\s+import)?/g)) {
+		specifiers.add(match[1].replace(/\./g, '/'));
+	}
+	// Rust/other use/mod
+	for (const match of content.matchAll(/\b(?:use|mod)\s+([A-Za-z0-9_:]+);/g)) {
+		specifiers.add(match[1].replace(/::/g, '/'));
 	}
 	return [...specifiers];
 };
@@ -333,7 +341,7 @@ const extractEvidenceSnippets = (content: string, terms: string[], maxSnippets: 
 	return snippets;
 };
 
-const dedupeOrdered = (values: string[]): string[] => {
+export const dedupeOrdered = (values: string[]): string[] => {
 	const seen = new Set<string>();
 	const result: string[] = [];
 	for (const value of values) {
@@ -933,20 +941,32 @@ export const gatherContextFromInputs = (
 			file,
 			score: (() => {
 				const structuralMetrics = metricsByPath.get(file.path) ?? {
-					exportCount: 0,
-					importCount: 0,
-					importedByCount: 0,
+					exportCount: countExports(file),
+					importCount: file.importCount ?? 0,
+					importedByCount: file.importedByCount ?? 0,
 					basenameExactMatch: false,
 				};
 				let score = scoreContextFile(file, terms, termWeights) + scoreStructuralSignals(structuralMetrics, thresholds);
 				const normalizedPath = normalizePath(file.path).toLowerCase();
+
 				if (!isTestQuery && hasAnyTerm(normalizedPath, ['/test/', '.test.', '.spec.'])) {
 					score -= 60;
 				}
-				if (!isGathererQuery && hasAnyTerm(normalizedPath, ['/common/contextgathering/contextgatherer.ts'])) {
-					score -= 70;
+
+				// Strong priority for implementation/wiring over hub/registry/common files
+				if (
+					!isGathererQuery &&
+					hasAnyTerm(normalizedPath, ['template', 'registry', 'provider', 'impl', 'common', 'hub', 'wrapper']) &&
+					structuralMetrics.importCount > 8 &&
+					structuralMetrics.exportCount < 4
+				) {
+					score -= 40;
 				}
-				return score;
+
+				if (!isGathererQuery && hasAnyTerm(normalizedPath, ['/common/contextgathering/contextgatherer.ts'])) {
+					score -= 75;
+				}
+				return Math.floor(score);
 			})(),
 		}))
 		.filter(({ score }) => score > 0)

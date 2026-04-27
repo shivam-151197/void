@@ -87,12 +87,14 @@ export type BuiltinToolResultType = {
 	'search_codebase': {
 		files: {
 			path: string;
+			fullPath: string;
 			relevance: 'high' | 'medium' | 'low';
 			reason: string;
 			symbols: string[];
 			preview: string;
 		}[];
 		search_summary: string;
+		grounding_rules: string;
 		suggested_next: string;
 		error?: string;
 	},

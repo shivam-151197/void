@@ -430,6 +430,7 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
     - All parameters are REQUIRED unless noted otherwise.
     - Do NOT stop working after a single tool call. You will be called repeatedly — keep calling tools until the entire task is complete.
     - Returning a response with NO tool call signals that you are DONE with all work.
+    - Tool results will be returned to you wrapped in a result tag of the same name (e.g. <tool_name_result>).
     - DO NOT USE external or alternate tool formats such as <run> or <apply_patch>. These are INVALID. You must ONLY use the exact XML tool tags defined above (e.g. <run_command>, <edit_file>).`)
 
 	return `\
@@ -461,10 +462,10 @@ Please assist the user with their query.`)
 ${workspaceFolders.join('\n') || 'NO FOLDERS OPEN'}
 
 - Active file:
-${activeURI}
+${activeURI || 'NONE'}
 
 - Open files:
-${openedURIs.join('\n') || 'NO OPENED FILES'}${''/* separator */}${mode === 'agent' && persistentTerminalIDs.length !== 0 ? `
+${openedURIs.join('\n') || 'NONE'}${''/* separator */}${mode === 'agent' && persistentTerminalIDs.length !== 0 ? `
 
 - Persistent terminal IDs available for you to run commands in: ${persistentTerminalIDs.join(', ')}` : ''}
 </system_info>`)
@@ -503,11 +504,9 @@ ${gatheredContext}
 		details.push(`For repository-change requests (refactor, replace API usage, migration, bug fix, feature edits), your FIRST response must include a real tool call that gathers code context. Do not stop at a narrative like "I'll inspect the repository" without calling a tool.`)
 		details.push(`Use tools like \`search_codebase\` and \`semantic_search\` to find relevant code when you are unsure where to look.`)
 		details.push(`For questions like "where is X implemented", "where is auth handled", "who calls Y", "where are routes registered", or "find the owner of Z", prefer \`search_codebase\` as the FIRST discovery tool. Do NOT start with \`get_dir_tree\` for these intent types.`)
-		details.push(`Use \`get_dir_tree\` first only when the user explicitly needs directory/layout information, or when prior search results are too ambiguous to choose a path.`)
-		details.push(`If the user's request names an implementation, owner, caller, definition, registration site, handler, route, service, or module behavior, default to \`search_codebase\` before broader tree exploration.`)
-		details.push(`After a \`search_codebase\` result returns ranked files, do NOT repeat the same \`search_codebase\` call with identical parameters. Either answer from those results or read one of the returned files to refine the answer.`)
-		details.push(`When answering from \`search_codebase\` results, you may only mention files that were actually returned unless you first inspect additional files with another tool. Do NOT infer plausible file names like middleware/authService/authRoutes if they were not returned or read.`)
-		details.push(`Do NOT ask the user for basic information about the repository (e.g., "where are the proto files?") until after you have exhausted your own search tools like \`search_codebase\`, \`semantic_search\`, and \`get_dir_tree\`.`)
+		details.push(`UNNECESSARY EXPLORATION: Once \`search_codebase\` returns highly relevant files (.js, .ts, etc.), do NOT call \`get_dir_tree\` for general exploration. Instead, use \`read_file\` on the returned candidates or STOP and answer. Loops of \`get_dir_tree\` calls are prohibited.`)
+		details.push(`GROUNDING: When using \`search_codebase\`, you may ONLY mention files and structures that were actually returned. Do NOT invent service names, directories, or languages (e.g. do not assume Go in a Node environment).`)
+		details.push(`STOP CRITERIA: If you have found high-relevance matches in \`search_codebase\`, you likely have sufficient information. Stop calling tools and provide your final answer.`)
 		details.push(`If a tool call is required, end the response with that tool call and no additional trailing text.`)
 		details.push(`Do not end your turn until you have either: (a) produced the mode-required structured output (like a <plan>), or (b) emitted a real tool call that advances the user's task.`)
 		details.push(`Never stop after generic prose such as "I'll inspect the repository", "Let's start by exploring", or "I can help with that". Those are invalid incomplete responses.`)
@@ -528,13 +527,12 @@ ${gatheredContext}
 	}
 
 	if (mode === 'plan') {
-		details.push(`You are in Plan Mode. You must follow a strict staged lifecycle:
-1. **Grounded Discovery**: Identify the real files, symbols, and implementation surfaces involved. You MUST read all relevant files before proposing a plan. A plan that references uninspected files will be automatically rejected.
-2. **Execution-Ready Plan**: Output ONLY a detailed implementation plan in a single <plan>...</plan> block. The plan should be PURE EXECUTION; do not include "reading" or "understanding" as checklist items.
-3. **Review Loop**: If the user gives feedback, regenerate and replace the entire previous <plan>.
-4. **Proceed Loop**: We will give you ONE task at a time. Execute tool calls to complete the current task.
-5. **Task Summary**: After each task, output a concise <task_summary> and stop. Implementation summaries require a mutating tool call verify completion.
-6. **Final Walkthrough**: After all tasks are complete, output a final <walkthrough>.`)
+		details.push(`You are in Plan Mode. You must follow a strict staged 5-phase lifecycle:
+1. **Phase 1: Discovery (context gathering)**: Gather necessary and sufficient context using \`search_codebase\`. You MUST successfully call \`search_codebase\` at least once. You must also read relevant implementation files using \`read_file\`. Verification is mandatory: every file, dependency, or schema you plan to use or modify must be inspected first. If a file is empty or missing, you must acknowledge it and adjust your approach.
+2. **Phase 2: Proposal (plan creation)**: Output a structured implementation plan in a single <plan>...</plan> block. The plan is for execution only; do not include discovery steps in the plan checklist.
+3. **Phase 3: Review (approval)**: If the user provides feedback, regenerate the entire plan.
+4. **Phase 4: Execution (implementation)**: Execute tasks sequentially. Emit exactly one tool call per response.
+5. **Phase 5: Completion (walkthrough)**: After all tasks are done, generate a final <walkthrough> summarizing what was changed and why, and providing clear instructions on how the user can use or verify the results.`)
 		details.push(`Plan-mode command semantics:
 - If there is no approved <plan> yet, you MAY use tools to do lightweight repository discovery before producing the first plan.
 - On that initial discovery pass, gather only what is needed to anchor the plan in the actual codebase. Do not make code changes yet.
@@ -549,7 +547,10 @@ ${gatheredContext}
 - IMPACT AWARENESS: Before changing existing functions, classes, or types, you MUST use tools (\`search_codebase\`, \`semantic_search\`, \`search_for_files\`, etc.) to find all callers and understand the impact area. A plan that lacks prior impact discovery will be rejected.
 - TOOL CHOICE: For repository questions framed as implementation/owner/caller/definition lookup, \`search_codebase\` is the default first tool. Do not substitute \`get_dir_tree\` unless the task is specifically about filesystem layout or search results are inconclusive.
 - ANTI-HALLUCINATION: Do not assume a branch exists or needs to be created without checking. Do not assume a file exists or its contents without using tools.
-- If you are about to answer with anything other than a <plan> block, stop and rewrite it as a valid <plan> block instead.
+- RULE OF TRUTH: If a plan relies on a specific file content (like a proto contract, a config file, or a dependency list), that file MUST be read and its contents verified in the current session before proposing any implementation step.
+- ENVIRONMENT VERIFICATION: Before assuming the availability of external tools (git, npm, compilers) or libraries, verify their presence and status (e.g. check \`package.json\`, \`go.mod\`, or run a version check command).
+- FAILURE ADAPTATION: If a discovery tool call returns empty or unexpected results, you MUST NOT proceed with assumptions. Instead, acknowledge the finding and search for the actual source of truth.
+- GROUNDED PLANNING: The implementation plan must contain NO discovery chores. All search, read, and inspection steps must be completed in Phase 1 before the plan is proposed. The plan should start at the first state-modifying action.
 - After a <plan> already exists, on non-proceed turns in plan mode, never call tools.`)
 		details.push(`The <plan> must be explicit and execution-ready. Include:
 - Objective

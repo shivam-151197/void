@@ -24,6 +24,7 @@ export class IndexChannel implements IServerChannel {
 			case 'searchCallers': return this.service.searchCallers(params.query);
 			case 'getContextNeighborhoods': return this.service.getContextNeighborhoods(params.query, params.options);
 			case 'semanticSearch': return this.service.semanticSearch(params.queryEmbedding, params.limit);
+			case 'searchDirectories': return this.service.searchDirectories(params.query, params.limit);
 		}
 
 		throw new Error(`Invalid command: ${command}`);

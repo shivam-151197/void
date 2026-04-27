@@ -48,7 +48,9 @@ const extractTagBlock = (s: string, tagName: string): string | null => {
 
 
 const CHARS_PER_TOKEN = 4 // assume abysmal chars per token
-const TRIM_TO_LEN = 120
+const TRIM_TO_LEN_ASSISTANT = 1000
+const TRIM_TO_LEN_TOOL = 16000
+const TRIM_TO_LEN_USER = 2000
 
 
 
@@ -357,7 +359,9 @@ const prepareOpenAIOrAnthropicMessages = ({
 		const m = messages[trimIdx]
 
 		// if can finish here, do
-		const numCharsWillTrim = m.content.length - TRIM_TO_LEN
+		const trimToLen = m.role === 'tool' ? TRIM_TO_LEN_TOOL : (m.role === 'user' ? TRIM_TO_LEN_USER : TRIM_TO_LEN_ASSISTANT)
+		const numCharsWillTrim = m.content.length - trimToLen
+
 		if (numCharsWillTrim > remainingCharsToTrim) {
 			// trim remainingCharsToTrim + '...'.length chars
 			m.content = m.content.slice(0, m.content.length - remainingCharsToTrim - '...'.length).trim() + '...'
@@ -365,7 +369,7 @@ const prepareOpenAIOrAnthropicMessages = ({
 		}
 
 		remainingCharsToTrim -= numCharsWillTrim
-		m.content = m.content.substring(0, TRIM_TO_LEN - '...'.length) + '...'
+		m.content = m.content.substring(0, trimToLen - '...'.length) + '...'
 		alreadyTrimmedIdxes.add(trimIdx)
 	}
 

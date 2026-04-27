@@ -3,8 +3,9 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
 
+import { URI } from '../../../../../base/common/uri.js';
 import { SearchCodebaseCandidate, SearchCodebaseSearchType } from './contextGatherer.js';
-import { buildSearchCodebaseRerankerPrompt } from './searchCodebasePromptService.js';
+import { buildSearchCodebaseExpansionPrompt, buildSearchCodebaseRerankerPrompt } from './searchCodebasePromptService.js';
 
 export type SearchCodebaseParams = {
 	query: string;
@@ -13,6 +14,7 @@ export type SearchCodebaseParams = {
 
 export type SearchCodebaseResultFile = {
 	path: string;
+	fullPath: string;
 	relevance: 'high' | 'medium' | 'low';
 	reason: string;
 	symbols: string[];
@@ -22,6 +24,7 @@ export type SearchCodebaseResultFile = {
 export type SearchCodebaseResult = {
 	files: SearchCodebaseResultFile[];
 	search_summary: string;
+	grounding_rules: string;
 	suggested_next: string;
 	error?: string;
 };
@@ -50,7 +53,17 @@ export const searchCodebaseToolInfo = {
 	}
 } as const;
 
-const trimPreview = (preview: string): string => preview.trim().split('\n').slice(0, 8).join('\n').trim();
+const trimPreview = (preview: string): string => preview.trim().split('\n').slice(0, 20).join('\n').trim();
+
+const buildPreview = (candidate: SearchCodebaseCandidate): string => {
+	if (candidate.evidenceSnippets?.length) {
+		return candidate.evidenceSnippets
+			.slice(0, 3)
+			.map(s => `[lines ${s.startLine}-${s.endLine}]\n${s.text.trim()}`)
+			.join('\n...\n');
+	}
+	return trimPreview(candidate.contentPreview);
+};
 
 const buildFallbackReason = (candidate: SearchCodebaseCandidate): string => {
 	const reasons: string[] = [];
@@ -82,6 +95,7 @@ const buildFallbackResult = (
 ): SearchCodebaseResult => {
 	const files = candidates.slice(0, 5).map((candidate, index) => ({
 		path: candidate.path,
+		fullPath: candidate.uri ? URI.parse(candidate.uri).fsPath : candidate.path,
 		relevance: fallbackRelevance(index),
 		reason: buildFallbackReason(candidate),
 		symbols: candidate.symbols?.map(symbol => symbol.name).slice(0, 12) ?? [],
@@ -91,6 +105,7 @@ const buildFallbackResult = (
 	return {
 		files,
 		search_summary: `Searched "${params.query}" across candidate files, reranked ${candidates.length}, and returned the top ${files.length}.`,
+		grounding_rules: '',
 		suggested_next: candidates[0]?.symbols?.[0]
 			? `If these are insufficient, search for references or callers of ${candidates[0].symbols[0].name}.`
 			: `If these are insufficient, try a narrower ${params.searchType === 'ownership' ? 'definition' : 'ownership'} search with a more specific symbol or filename.`,
@@ -118,16 +133,22 @@ const parseRerankerResponse = (responseText: string): RerankerResponse | null =>
 export const runSearchCodebase = async (
 	params: SearchCodebaseParams,
 	deps: {
-		getCandidates: (params: SearchCodebaseParams) => Promise<SearchCodebaseCandidate[]>;
+		expandQuery: (messages: { systemPrompt: string; userPrompt: string }) => Promise<string | null>;
+		getCandidates: (params: SearchCodebaseParams & { extraTerms?: string[] }) => Promise<SearchCodebaseCandidate[]>;
 		rerankCandidates: (messages: { systemPrompt: string; userPrompt: string }) => Promise<string | null>;
 	},
 ): Promise<SearchCodebaseResult> => {
 	try {
-		const candidates = (await deps.getCandidates(params)).slice(0, 8);
+		const expansionMessages = buildSearchCodebaseExpansionPrompt(params);
+		const expandedResult = await deps.expandQuery(expansionMessages);
+		const extraTerms = expandedResult ? expandedResult.split(',').map(t => t.trim()).filter(Boolean) : [];
+
+		const candidates = (await deps.getCandidates({ ...params, extraTerms })).slice(0, 12); // Slightly larger pool for expansion
 		if (candidates.length === 0) {
 			return {
 				files: [],
 				search_summary: `Searched "${params.query}" but found no viable candidates.`,
+				grounding_rules: '',
 				suggested_next: 'Try a more specific symbol name, filename fragment, or narrower search type.',
 			};
 		}
@@ -145,7 +166,7 @@ export const runSearchCodebase = async (
 
 		const candidateByPath = new Map(candidates.map(candidate => [candidate.path, candidate] as const));
 		const files = parsed.ranked
-			.slice(0, 6)
+			.slice(0, 8)
 			.map(item => {
 				const candidate = candidateByPath.get(item.path);
 				if (!candidate) {
@@ -153,10 +174,11 @@ export const runSearchCodebase = async (
 				}
 				return {
 					path: candidate.path,
+					fullPath: candidate.uri ? URI.parse(candidate.uri).fsPath : candidate.path,
 					relevance: item.relevance,
 					reason: item.reason,
-					symbols: candidate.symbols?.map(symbol => symbol.name).slice(0, 12) ?? [],
-					preview: trimPreview(candidate.contentPreview),
+					symbols: candidate.symbols?.map(symbol => symbol.name).slice(0, 15) ?? [],
+					preview: buildPreview(candidate),
 				} satisfies SearchCodebaseResultFile;
 			})
 			.filter((item): item is SearchCodebaseResultFile => item !== null);
@@ -165,16 +187,21 @@ export const runSearchCodebase = async (
 			return buildFallbackResult(params, candidates, 'LLM reranker returned unknown paths, returned static ranking.');
 		}
 
+		const hasHighRelevance = files.some(f => f.relevance === 'high');
+		const groundingRules = `\n\n[[[ STRICT GROUNDING RULES ]]]\n1. EXCLUSIVELY use the files and code snippets listed above.\n2. DO NOT assume the existence of any file or directory not explicitly shown in these results.\n3. Cite symbols and Evidence from the snippets when answering.${hasHighRelevance ? '\n4. If these results are sufficient, STOP and answer the user query now.' : '\n4. If these results are NOT sufficient, you MUST call another discovery tool (e.g. read_file, search_for_files) to proceed.'}`;
+
 		return {
 			files,
 			search_summary: `Searched "${params.query}" across candidate files, reranked ${candidates.length}, and returned the top ${files.length}.`,
-			suggested_next: parsed.suggested_next ?? buildFallbackResult(params, candidates).suggested_next,
+			grounding_rules: groundingRules,
+			suggested_next: parsed.suggested_next || (hasHighRelevance ? 'Answer the user query based on the high-relevance results above.' : buildFallbackResult(params, candidates).suggested_next),
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return {
 			files: [],
 			search_summary: `Search failed for "${params.query}".`,
+			grounding_rules: '',
 			suggested_next: 'Retry with a simpler query or a different search type.',
 			error: message,
 		};

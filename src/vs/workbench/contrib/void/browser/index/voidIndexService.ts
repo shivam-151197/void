@@ -9,7 +9,7 @@ import { IMainProcessService } from '../../../../../platform/ipc/common/mainProc
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../common/contributions.js';
 import { ITextFileService } from '../../../../services/textfile/common/textfiles.js';
-import { IndexedContextNeighborhood, IndexedEdge, IndexedFileGraph, IndexedNodeRole, IndexedSymbol, IVoidIndexMainService, IVoidIndexService, VoidIndexQueryIntent } from '../../common/index/indexServiceTypes.js';
+import { IndexedContextNeighborhood, IndexedEdge, IndexedFileGraph, IndexedNodeRole, IndexedSymbol, IVoidIndexMainService, IVoidIndexService, VoidIndexQueryIntent, RankedDirectory } from '../../common/index/indexServiceTypes.js';
 
 export class VoidIndexService extends Disposable implements IVoidIndexService, IWorkbenchContribution {
 	readonly _serviceBrand: undefined;
@@ -408,6 +408,10 @@ export class VoidIndexService extends Disposable implements IVoidIndexService, I
 
 	async getContextNeighborhoods(query: string, options?: { intent?: VoidIndexQueryIntent; limit?: number }): Promise<IndexedContextNeighborhood[]> {
 		return this._mainService.getContextNeighborhoods(query, options);
+	}
+
+	async searchDirectories(query: string, limit?: number): Promise<RankedDirectory[]> {
+		return this._mainService.searchDirectories(query, limit);
 	}
 }
 
