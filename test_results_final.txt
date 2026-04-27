@@ -1,0 +1,158 @@
+
+> code-oss-dev@1.99.3 electron
+> node build/lib/electron
+
+Found --crash-reporter-directory argument. Setting crashDumps directory to be '/home/shivam/Desktop/void/.build/crashes'
+[69394:0426/194133.844836:WARNING:vaapi_wrapper.cc(1534)] Skipping nVidia device named: nvidia-drm
+[69394:0426/194133.848559:WARNING:viz_main_impl.cc(85)] VizNullHypothesis is disabled (not a warning)
+[69346:0426/194134.039757:INFO:CONSOLE(2)] "The vm module of Node.js is deprecated in the renderer process and will be removed.", source: node:electron/js2c/renderer_init (2)
+[69346:0426/194134.484156:INFO:CONSOLE(2)] "Platform browser has already been set. Overwriting the platform with [object Object].", source: /home/shivam/Desktop/void/node_modules/@vscode/vscode-languagedetection/dist/lib/index.js (2)
+(node:69413) [DEP0025] DeprecationWarning: sys is deprecated. Use util instead.
+(Use `exe --trace-deprecation ...` to show where the warning was created)
+(node:69413) ExperimentalWarning: WASI is an experimental feature and might change at any time
+[69346:0426/194137.507388:INFO:CONSOLE(220)] "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools
+You might need to use a local HTTP server (instead of file://): https://react.dev/link/react-devtools-faq font-weight:bold", source: file:///home/shivam/Desktop/void/test/unit/electron/renderer.js (220)
+[69346:0426/194137.514720:INFO:CONSOLE(220)] "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools
+You might need to use a local HTTP server (instead of file://): https://react.dev/link/react-devtools-faq font-weight:bold", source: file:///home/shivam/Desktop/void/test/unit/electron/renderer.js (220)
+
+[0m[0m
+[0m  Void context gatherer[0m
+  [32m  ✔[0m[90m extracts useful terms from natural language and identifiers[0m
+  [32m  ✔[0m[90m search_codebase terms preserve real identifiers and avoid synthetic joins[0m
+  [32m  ✔[0m[90m filters generated, vendor, hidden, and binary paths[0m
+  [32m  ✔[0m[90m ranks by pathname, search hits, content, and symbols[0m
+  [31m  1) judgement layer prefers execution and wiring files over registries[0m
+  [32m  ✔[0m[90m role classifier prefers core execution over wrappers[0m
+  [31m  2) role classifier prefers prompt assembly over prompt templates[0m
+  [31m  3) ownership heuristics prefer tool owner over orchestrator loop[0m
+  [31m  4) ownership heuristics prefer prompt assembly owner over template and source files[0m
+  [31m  5) summarizes top gathered files for prompt-boundary diagnostics[0m
+  [32m  ✔[0m[90m formats gathered context for prompt injection with the owned top file first[0m
+  [32m  ✔[0m[90m caps full file content to top files and truncates long content[0m
+  [32m  ✔[0m[90m returns an empty relevant file list when there are no matches[0m
+  [32m  ✔[0m[90m search_codebase lexical ranking prefers direct symbol owners over hub files[0m
+  [31m  6) search_codebase caller ranking penalizes definition files and prefers call sites[0m
+  [31m  7) search_codebase caller ranking penalizes tests and basename-only matches[0m
+  [32m  ✔[0m[90m search_codebase caller ranking strongly prefers indexed caller hits[0m
+  [32m  ✔[0m[90m search_codebase preview prefers hierarchical neighborhood summaries when present[0m
+  [32m  ✔[0m[90m search_codebase lexical ranking finds exact tool identifier files[0m
+  [32m  ✔[0m[90m search_codebase definition ranking prefers declaration over prompt helpers[0m
+
+
+[92m [0m[32m 13 passing[0m[90m (130ms)[0m
+[31m  7 failing[0m
+
+[0m  1) Void context gatherer
+       judgement layer prefers execution and wiring files over registries:
+
+      [31m[0m
+      [32m+ expected[0m [31m- actual[0m
+
+      [31m-src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts[0m
+      [32m+src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts[0m
+      [0m[90m
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts'
+  - 'src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts'
+      at Context.<anonymous> (file:///home/shivam/Desktop/void/out/vs/workbench/contrib/void/test/common/contextGatherer.test.js:60:16)
+      at file:///home/shivam/Desktop/void/test/unit/electron/renderer.js:420:17
+[0m
+[0m  2) Void context gatherer
+       role classifier prefers prompt assembly over prompt templates:
+
+      [31m[0m
+      [32m+ expected[0m [31m- actual[0m
+
+      [31m-src/vs/workbench/contrib/void/common/prompt/prompts.ts[0m
+      [32m+src/vs/workbench/contrib/void/browser/convertToLLMMessageService.ts[0m
+      [0m[90m
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'src/vs/workbench/contrib/void/common/prompt/prompts.ts'
+  - 'src/vs/workbench/contrib/void/browser/convertToLLMMessageService.ts'
+      at Context.<anonymous> (file:///home/shivam/Desktop/void/out/vs/workbench/contrib/void/test/common/contextGatherer.test.js:103:16)
+      at file:///home/shivam/Desktop/void/test/unit/electron/renderer.js:420:17
+[0m
+[0m  3) Void context gatherer
+       ownership heuristics prefer tool owner over orchestrator loop:
+
+      [31m[0m
+      [32m+ expected[0m [31m- actual[0m
+
+      [31m-src/vs/workbench/contrib/void/browser/chatThreadService.ts[0m
+      [32m+src/vs/workbench/contrib/void/browser/toolsService.ts[0m
+      [0m[90m
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'src/vs/workbench/contrib/void/browser/chatThreadService.ts'
+  - 'src/vs/workbench/contrib/void/browser/toolsService.ts'
+      at Context.<anonymous> (file:///home/shivam/Desktop/void/out/vs/workbench/contrib/void/test/common/contextGatherer.test.js:118:16)
+      at file:///home/shivam/Desktop/void/test/unit/electron/renderer.js:420:17
+[0m
+[0m  4) Void context gatherer
+       ownership heuristics prefer prompt assembly owner over template and source files:
+
+      [31m[0m
+      [32m+ expected[0m [31m- actual[0m
+
+      [31m-src/vs/workbench/contrib/void/common/prompt/prompts.ts[0m
+      [32m+src/vs/workbench/contrib/void/browser/convertToLLMMessageService.ts[0m
+      [0m[90m
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'src/vs/workbench/contrib/void/common/prompt/prompts.ts'
+  - 'src/vs/workbench/contrib/void/browser/convertToLLMMessageService.ts'
+      at Context.<anonymous> (file:///home/shivam/Desktop/void/out/vs/workbench/contrib/void/test/common/contextGatherer.test.js:138:16)
+      at file:///home/shivam/Desktop/void/test/unit/electron/renderer.js:420:17
+[0m
+[0m  5) Void context gatherer
+       summarizes top gathered files for prompt-boundary diagnostics:
+[0m[31m     [0m[90m
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /^src\/vs\/workbench\/contrib\/void\/browser\/toolsService\.ts \(\d+\)$/. Input:
+  
+  'src/vs/workbench/contrib/void/browser/chatThreadService.ts (63)'
+  
+      at Context.<anonymous> (file:///home/shivam/Desktop/void/out/vs/workbench/contrib/void/test/common/contextGatherer.test.js:145:16)
+      at file:///home/shivam/Desktop/void/test/unit/electron/renderer.js:420:17
+[0m
+[0m  6) Void context gatherer
+       search_codebase caller ranking penalizes definition files and prefers call sites:
+
+      [31m[0m
+      [32m+ expected[0m [31m- actual[0m
+
+      [31m-src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts[0m
+      [32m+src/vs/workbench/contrib/void/browser/chatThreadService.ts[0m
+      [0m[90m
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts'
+  - 'src/vs/workbench/contrib/void/browser/chatThreadService.ts'
+      at Context.<anonymous> (file:///home/shivam/Desktop/void/out/vs/workbench/contrib/void/test/common/contextGatherer.test.js:224:16)
+      at file:///home/shivam/Desktop/void/test/unit/electron/renderer.js:420:17
+[0m
+[0m  7) Void context gatherer
+       search_codebase caller ranking penalizes tests and basename-only matches:
+
+      [31m[0m
+      [32m+ expected[0m [31m- actual[0m
+
+      [31m-src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts[0m
+      [32m+src/vs/workbench/contrib/void/browser/chatThreadService.ts[0m
+      [0m[90m
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts'
+  - 'src/vs/workbench/contrib/void/browser/chatThreadService.ts'
+      at Context.<anonymous> (file:///home/shivam/Desktop/void/out/vs/workbench/contrib/void/test/common/contextGatherer.test.js:251:16)
+      at file:///home/shivam/Desktop/void/test/unit/electron/renderer.js:420:17
+[0m
+
+

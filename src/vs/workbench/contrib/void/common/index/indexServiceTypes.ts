@@ -11,6 +11,12 @@ export type VoidIndexQueryIntent = 'ownership' | 'references' | 'definition' | '
 export type IndexedNodeRole = 'file' | 'definition' | 'call' | 'import' | 'export' | 'reference' | 'container';
 export type IndexedEdgeType = 'contains' | 'defines' | 'calls' | 'imports' | 'references';
 
+export interface RankedDirectory {
+	uri: URI;
+	score: number;
+	reason: string;
+}
+
 export interface IVoidIndexService {
 	readonly _serviceBrand: undefined;
 	indexWorkspace(): Promise<void>;
@@ -20,6 +26,7 @@ export interface IVoidIndexService {
 	semanticSearch(query: string, limit?: number): Promise<IndexedSymbol[]>;
 	getSymbolsForFile(uri: URI): Promise<IndexedSymbol[]>;
 	getContextNeighborhoods(query: string, options?: { intent?: VoidIndexQueryIntent; limit?: number }): Promise<IndexedContextNeighborhood[]>;
+	searchDirectories(query: string, limit?: number): Promise<RankedDirectory[]>;
 }
 
 export interface IVoidIndexMainService {
@@ -31,6 +38,7 @@ export interface IVoidIndexMainService {
 	searchCallers(query: string): Promise<IndexedSymbol[]>;
 	semanticSearch(queryEmbedding: number[], limit?: number): Promise<IndexedSymbol[]>;
 	getContextNeighborhoods(query: string, options?: { intent?: VoidIndexQueryIntent; limit?: number }): Promise<IndexedContextNeighborhood[]>;
+	searchDirectories(query: string, limit?: number): Promise<RankedDirectory[]>;
 }
 export const IVoidIndexMainService = createDecorator<IVoidIndexMainService>('voidIndexMainService');
 

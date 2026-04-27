@@ -7,7 +7,7 @@ import type { Database } from '@vscode/sqlite3';
 import { join } from '../../../../../base/common/path.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { IEnvironmentMainService } from '../../../../../platform/environment/electron-main/environmentMainService.js';
-import { IndexedContextNeighborhood, IndexedEdge, IndexedFileGraph, IndexedSymbol, FileIndexInfo, IVoidIndexMainService, VoidIndexQueryIntent } from '../../common/index/indexServiceTypes.js';
+import { IndexedContextNeighborhood, IndexedEdge, IndexedFileGraph, IndexedSymbol, FileIndexInfo, IVoidIndexMainService, VoidIndexQueryIntent, RankedDirectory } from '../../common/index/indexServiceTypes.js';
 
 export class VoidIndexMainService implements IVoidIndexMainService {
 	readonly _serviceBrand: undefined;
@@ -26,21 +26,74 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 		}
 
 		this._db = (async () => {
-			const sqlite3 = (await import('@vscode/sqlite3')).verbose();
+			const mod = await import('@vscode/sqlite3');
+			const sqlite3 = (mod.default || mod);
+			const sqlite3_verbose = sqlite3.verbose ? sqlite3.verbose() : sqlite3;
 			return new Promise<Database>((resolve, reject) => {
-				const db = new sqlite3.Database(this._dbPath, (err) => {
-					if (err) return reject(err);
+				const db = new sqlite3_verbose.Database(this._dbPath, (err) => {
+					if (err) {
+						console.error('[VoidIndexMainService] Error opening database:', err);
+						return reject(err);
+					}
+
 					db.serialize(() => {
-						db.run('CREATE TABLE IF NOT EXISTS files (uri TEXT PRIMARY KEY, hash TEXT, lastIndexed INTEGER)');
-						db.run('CREATE TABLE IF NOT EXISTS symbols (id TEXT PRIMARY KEY, uri TEXT, name TEXT, type TEXT, role TEXT, parentId TEXT, metadata TEXT, startLine INTEGER, startColumn INTEGER, endLine INTEGER, endColumn INTEGER, text TEXT, embedding BLOB)');
-						db.run('CREATE TABLE IF NOT EXISTS edges (id TEXT PRIMARY KEY, sourceId TEXT, sourceUri TEXT, targetId TEXT, targetUri TEXT, targetName TEXT, type TEXT, metadata TEXT)');
-						db.run('CREATE INDEX IF NOT EXISTS idx_symbols_uri ON symbols(uri)');
-						db.run('CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name)');
-						db.run('CREATE INDEX IF NOT EXISTS idx_symbols_parent ON symbols(parentId)');
-						db.run('CREATE INDEX IF NOT EXISTS idx_edges_source_id ON edges(sourceId)');
-						db.run('CREATE INDEX IF NOT EXISTS idx_edges_source_uri ON edges(sourceUri)');
-						db.run('CREATE INDEX IF NOT EXISTS idx_edges_target_name ON edges(targetName)');
-						resolve(db);
+						// 1. Initial table creation - now including parentId for new databases
+						db.run('CREATE TABLE IF NOT EXISTS files (uri TEXT PRIMARY KEY, hash TEXT, lastIndexed INTEGER)', (err) => {
+							if (err) console.error('[VoidIndexMainService] Error creating files table:', err);
+						});
+						db.run('CREATE TABLE IF NOT EXISTS symbols (id TEXT PRIMARY KEY, uri TEXT, name TEXT, type TEXT, role TEXT, metadata TEXT, startLine INTEGER, startColumn INTEGER, endLine INTEGER, endColumn INTEGER, text TEXT, embedding BLOB, parentId TEXT)', (err) => {
+							if (err) console.error('[VoidIndexMainService] Error creating symbols table:', err);
+						});
+						db.run('CREATE TABLE IF NOT EXISTS edges (id TEXT PRIMARY KEY, sourceId TEXT, sourceUri TEXT, targetId TEXT, targetUri TEXT, targetName TEXT, type TEXT, metadata TEXT)', (err) => {
+							if (err) console.error('[VoidIndexMainService] Error creating edges table:', err);
+						});
+
+						// 2. Migration: Ensure parentId exists in symbols (for existing databases)
+						db.all('PRAGMA table_info(symbols)', (err, columns: any[]) => {
+							if (err) {
+								console.error('[VoidIndexMainService] Error checking symbols table info:', err);
+								// Fallback: try to resolve anyway, though errors might follow
+								resolve(db);
+								return;
+							}
+
+							const hasParentId = columns.some(c => c.name === 'parentId');
+							
+							const completeInit = () => {
+								db.serialize(() => {
+									db.run('CREATE INDEX IF NOT EXISTS idx_symbols_uri ON symbols(uri)', (err) => {
+										if (err) console.error('[VoidIndexMainService] Error creating index idx_symbols_uri:', err);
+									});
+									db.run('CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name)', (err) => {
+										if (err) console.error('[VoidIndexMainService] Error creating index idx_symbols_name:', err);
+									});
+									db.run('CREATE INDEX IF NOT EXISTS idx_symbols_parent ON symbols(parentId)', (err) => {
+										if (err) console.error('[VoidIndexMainService] Error creating index idx_symbols_parent:', err);
+									});
+									db.run('CREATE INDEX IF NOT EXISTS idx_edges_source_id ON edges(sourceId)', (err) => {
+										if (err) console.error('[VoidIndexMainService] Error creating index idx_edges_source_id:', err);
+									});
+									db.run('CREATE INDEX IF NOT EXISTS idx_edges_source_uri ON edges(sourceUri)', (err) => {
+										if (err) console.error('[VoidIndexMainService] Error creating index idx_edges_source_uri:', err);
+									});
+									db.run('CREATE INDEX IF NOT EXISTS idx_edges_target_name ON edges(targetName)', (err) => {
+										if (err) console.error('[VoidIndexMainService] Error creating index idx_edges_target_name:', err);
+									});
+									resolve(db);
+								});
+							};
+
+							if (!hasParentId) {
+								db.run('ALTER TABLE symbols ADD COLUMN parentId TEXT', (err) => {
+									if (err) {
+										console.error('[VoidIndexMainService] Error adding parentId column:', err);
+									}
+									completeInit();
+								});
+							} else {
+								completeInit();
+							}
+						});
 					});
 				});
 			});
@@ -255,6 +308,66 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 				}
 				return a.uri.toString().localeCompare(b.uri.toString());
 			})
+			.slice(0, limit);
+	}
+
+	async searchDirectories(query: string, limit: number = 10): Promise<RankedDirectory[]> {
+		const db = await this._getDb();
+		const queryTerms = this._extractQueryTerms(query).slice(0, 6);
+		if (queryTerms.length === 0) return [];
+
+		const queryClauses = queryTerms.map(() => '(LOWER(name) LIKE ? OR LOWER(text) LIKE ?)');
+		const exacts = queryTerms.map(() => '?').join(', ');
+		const params: string[] = [];
+		for (const term of queryTerms) {
+			params.push(`%${term}%`, `%${term}%`);
+		}
+		params.push(...queryTerms);
+
+		const sql = `
+			SELECT 
+				uri,
+				COUNT(*) as totalMatches,
+				SUM(CASE WHEN LOWER(name) IN (${exacts}) THEN 10 ELSE 1 END) as fileScore
+			FROM symbols
+			WHERE role != 'file' AND (${queryClauses.join(' OR ')})
+			GROUP BY uri
+			ORDER BY fileScore DESC
+			LIMIT 200
+		`;
+
+		const rows = await this._all(db, sql, params, row => ({
+			uri: row.uri as string,
+			matches: row.totalMatches as number,
+			score: row.fileScore as number
+		}));
+
+		const dirScores = new Map<string, { score: number; reasons: Set<string> }>();
+		for (const row of rows) {
+			const uri = URI.parse(row.uri);
+			const segments = uri.path.split('/').filter(Boolean);
+			segments.pop(); // Remove filename
+			
+            // Add entries for all parent directories to account for deeply nested relevance
+			let currentPath = '';
+			for (const segment of segments) {
+				currentPath += (currentPath ? '/' : '') + segment;
+				const stats = dirScores.get(currentPath) ?? { score: 0, reasons: new Set() };
+				stats.score += row.score;
+				if (row.matches > 0) {
+					stats.reasons.add(`contains matching symbols`);
+				}
+				dirScores.set(currentPath, stats);
+			}
+		}
+
+		return Array.from(dirScores.entries())
+			.map(([path, stats]) => ({
+				uri: URI.file(path),
+				score: stats.score,
+				reason: Array.from(stats.reasons).join(', ')
+			}))
+			.sort((a, b) => b.score - a.score)
 			.slice(0, limit);
 	}
 

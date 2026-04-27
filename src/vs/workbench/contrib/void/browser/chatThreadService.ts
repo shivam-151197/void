@@ -780,6 +780,16 @@ Important:
 		return this._successfulToolMessagesForCurrentTask(threadId).some(message => discoveryTools.has(message.name));
 	}
 
+	private _hasSuccessfulSearchCodebaseInThread(threadId: string): boolean {
+		const thread = this.state.allThreads[threadId]
+		if (!thread) return false
+		return thread.messages.some(message =>
+			message.role === 'tool' &&
+			message.type === 'success' &&
+			message.name === 'search_codebase'
+		)
+	}
+
 	private _hasSuccessfulGatherDiscoveryInThread(threadId: string): boolean {
 		const thread = this.state.allThreads[threadId]
 		if (!thread) return false
@@ -1409,6 +1419,41 @@ Important:
 						!planHasStructuredStepHeadings(extractedPlan)
 					)
 
+				const needsSearchCodebaseBeforePlanRetry =
+					chatMode === 'plan' &&
+					!latestAssistantPlanAlreadyExists &&
+					!this._hasSuccessfulSearchCodebaseInThread(threadId) &&
+					!toolCall &&
+					!correctiveRetryInstruction
+
+				if (needsSearchCodebaseBeforePlanRetry) {
+					correctiveRetryInstruction = [
+						'Phase 1 (Discovery) is incomplete.',
+						'You MUST use `search_codebase` at least once before proposing a plan.',
+						'This ensures you find the system-of-record files and identify all relevant modules.',
+						'Perform repository discovery using `search_codebase` now.',
+					].join(' ')
+					console.warn(`[Void][AgentLoop][${threadId}] plan mode response arrived without search_codebase; scheduling discovery retry`);
+					shouldRetryLLM = true
+					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+					continue
+				}
+
+				if (needsInitialDiscoveryRetry) {
+					correctiveRetryInstruction = [
+						'Phase 1 (Discovery) is incomplete.',
+						'You are still missing repository grounding.',
+						'Do not write a plan yet.',
+						'First call a real repository discovery tool to inspect the codebase.',
+						'After tool results come back, continue discovery until you know the concrete files/modules involved.',
+						'Only then move to Phase 2 and write the first <plan>.',
+					].join(' ')
+					console.warn(`[Void][AgentLoop][${threadId}] plan mode response arrived before any successful discovery tool results; scheduling discovery retry`);
+					shouldRetryLLM = true
+					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+					continue
+				}
+
 				const needsDiscoveryBeforePlanRetry =
 					chatMode === 'plan' &&
 					!latestAssistantPlanAlreadyExists &&
@@ -1417,26 +1462,12 @@ Important:
 					!toolCall &&
 					!correctiveRetryInstruction
 
-				if (needsInitialDiscoveryRetry) {
-					correctiveRetryInstruction = [
-						'You are still missing repository grounding.',
-						'Do not write a plan yet.',
-						'First call a real repository discovery tool to inspect the codebase.',
-						'After tool results come back, continue discovery until you know the concrete files/modules involved.',
-						'Only then write the first <plan>.',
-					].join(' ')
-					console.warn(`[Void][AgentLoop][${threadId}] plan mode response arrived before any successful discovery tool results; scheduling discovery retry`);
-					shouldRetryLLM = true
-					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
-					continue
-				}
-
 				if (needsDiscoveryBeforePlanRetry) {
 					correctiveRetryInstruction = [
+						'Phase 1 (Discovery) is incomplete.',
 						'Your previous <plan> was created too early.',
-						'Do not create the first plan before repository discovery is complete.',
-						'First use repository discovery tools to inspect the actual codebase and identify the relevant files.',
-						'After discovery results are available, write the first <plan> using those findings.',
+						'Do not create the first plan before repository discovery (including `search_codebase` and `read_file`) is complete.',
+						'After discovery results are available, move to Phase 2 (Planning) and write the first <plan>.',
 					].join(' ')
 					console.warn(`[Void][AgentLoop][${threadId}] plan mode response contained a plan before any successful discovery tool results; scheduling discovery retry`);
 					shouldRetryLLM = true

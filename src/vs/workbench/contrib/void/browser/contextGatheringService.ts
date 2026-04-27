@@ -18,9 +18,9 @@ import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { EndOfLinePreference } from '../../../../editor/common/model.js';
 import { QueryBuilder } from '../../../services/search/common/queryBuilder.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
-import { GatheredContext, GatherContextFileInput, GatherContextSymbol, SearchCodebaseCandidate, SearchCodebaseSearchType, extractContextTerms, extractSearchCodebaseAnchors, extractSearchCodebaseTerms, gatherContextFromInputs, rankSearchCodebaseCandidates } from '../common/contextGathering/contextGatherer.js';
+import { GatheredContext, GatherContextFileInput, GatherContextSymbol, SearchCodebaseCandidate, SearchCodebaseSearchType, dedupeOrdered, extractContextTerms, extractSearchCodebaseAnchors, extractSearchCodebaseTerms, gatherContextFromInputs, rankSearchCodebaseCandidates } from '../common/contextGathering/contextGatherer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
-import { IndexedContextNeighborhood, IVoidIndexService } from '../common/index/indexServiceTypes.js';
+import { IndexedContextNeighborhood, IVoidIndexService, RankedDirectory } from '../common/index/indexServiceTypes.js';
 
 
 // make sure snippet logic works
@@ -40,7 +40,7 @@ export interface IContextGatheringService {
 	getCachedSnippets(): string[];
 	getSemanticSnippets(query: string): Promise<string[]>;
 	gatherContext(task: string, workspaceRoot?: URI): Promise<GatheredContext>;
-	searchCodebaseCandidates(query: string, searchType: SearchCodebaseSearchType, workspaceRoot?: URI): Promise<SearchCodebaseCandidate[]>;
+	searchCodebaseCandidates(query: string, searchType: SearchCodebaseSearchType, opts?: { workspaceRoot?: URI; extraTerms?: string[] }): Promise<SearchCodebaseCandidate[]>;
 }
 
 export const IContextGatheringService = createDecorator<IContextGatheringService>('contextGatheringService');
@@ -153,6 +153,7 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 		const searchHitCounts = await this._collectSearchHitCounts(task, roots);
 		const initialFiles = fileUris.map(uri => ({
 			path: this._relativePath(uri, roots),
+			uri: uri.toString(),
 			searchHitCount: searchHitCounts.get(uri.toString()) ?? 0,
 		} satisfies GatherContextFileInput));
 
@@ -198,7 +199,10 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 		});
 	}
 
-	public async searchCodebaseCandidates(query: string, searchType: SearchCodebaseSearchType, workspaceRoot?: URI): Promise<SearchCodebaseCandidate[]> {
+	public async searchCodebaseCandidates(query: string, searchType: SearchCodebaseSearchType, opts?: { workspaceRoot?: URI; extraTerms?: string[] }): Promise<SearchCodebaseCandidate[]> {
+		const workspaceRoot = opts?.workspaceRoot;
+		const extraTerms = opts?.extraTerms ?? [];
+
 		const workspaceFolders = workspaceRoot
 			? [workspaceRoot]
 			: this._workspaceContextService.getWorkspace().folders.map(folder => folder.uri);
@@ -208,8 +212,33 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 		}
 
 		const fileUris = await this._collectWorkspaceFiles(roots);
-		const searchTerms = extractSearchCodebaseTerms(query);
-		const searchHitCounts = await this._collectSearchHitCountsFromTerms(searchTerms, roots);
+		const searchTerms = dedupeOrdered([...extractSearchCodebaseTerms(query), ...extraTerms]);
+
+		// Phase 1: Directory Discovery
+		let rankedDirs: RankedDirectory[] = [];
+		try {
+			const rawDirs = await this._voidIndexService.searchDirectories(query, 5);
+			rankedDirs = rawDirs.filter(d => roots.some(root => d.uri.toString().startsWith(root.toString())));
+		} catch (e) {
+			console.warn('Void: searchDirectories failed:', e);
+		}
+		const scopedRoots = rankedDirs.length > 0 ? rankedDirs.map(d => d.uri) : roots;
+
+		// Phase 2: Scoped Search
+		let searchHitCounts = await this._collectSearchHitCountsFromTerms(searchTerms, scopedRoots);
+
+		// Phase 3: Rediscovery (Fallback to global if scoped search is too narrow)
+		if (searchHitCounts.size < 5 && rankedDirs.length > 0) {
+			try {
+				const globalHits = await this._collectSearchHitCountsFromTerms(searchTerms, roots);
+				for (const [uri, count] of globalHits) {
+					searchHitCounts.set(uri, (searchHitCounts.get(uri) ?? 0) + count);
+				}
+			} catch (e) {
+				console.warn('Void: global fallback search failed:', e);
+			}
+		}
+
 		const neighborhoods = await this._collectContextNeighborhoods(query, searchType, roots);
 		const neighborhoodsByUri = new Map(neighborhoods.map(neighborhood => [neighborhood.uri.toString(), neighborhood] as const));
 		const callerHitCounts = searchType === 'callers'
@@ -217,6 +246,7 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 			: new Map<string, number>();
 		const initialFiles = fileUris.map(uri => ({
 			path: this._relativePath(uri, roots),
+			uri: uri.toString(),
 			searchHitCount: searchHitCounts.get(uri.toString()) ?? 0,
 			graphHitCount: neighborhoodsByUri.get(uri.toString())?.score ?? 0,
 			callerHitCount: callerHitCounts.get(uri.toString()) ?? 0,
@@ -242,6 +272,7 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 			const modifiedTimeMs = await this._getModifiedTimeMs(uri);
 			return {
 				path: candidate.path,
+				uri: uri.toString(),
 				content,
 				contextSummary,
 				symbols,
@@ -405,8 +436,11 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 
 		try {
 			const queryBuilder = this._instantiationService.createInstance(QueryBuilder);
+			const escapedBasename = basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			// Use the same robust import pattern as our gatherer for consistency
+			const importPattern = `(?:import|export|from|require\\(|use|mod)\\s*['"]?[^'"]*\\b${escapedBasename}\\b`;
 			const query = queryBuilder.text({
-				pattern: `\\b${basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+				pattern: importPattern,
 				isRegExp: true,
 			}, roots);
 			const results = await this._searchService.textSearch(query, CancellationToken.None);

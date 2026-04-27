@@ -344,11 +344,14 @@ export class ToolsService implements IToolsService {
 				const query = sanitizedQuery
 				const sanitizedSearchType = sanitizeSearchCodebaseField(searchTypeUnknown).toLowerCase()
 				const rawSearchType = (sanitizedSearchType.split(/\s+/)[0] || 'ownership')
-				const searchType = (
+				let searchType = (
 					rawSearchType === 'implementation' || rawSearchType === 'implemented'
 						? 'ownership'
 						: rawSearchType
 				)
+				if (searchType === 'definitions') searchType = 'definition'
+				if (searchType === 'refs') searchType = 'references'
+				if (searchType === 'calls') searchType = 'callers'
 				if (!['ownership', 'references', 'definition', 'callers'].includes(searchType)) {
 					throw new Error(`Invalid LLM output format: search_type must be one of ownership, references, definition, callers. Got "${searchType}".`)
 				}
@@ -538,8 +541,9 @@ export class ToolsService implements IToolsService {
 				const result = await runSearchCodebase(
 					{ query, searchType } satisfies SearchCodebaseParams,
 					{
-						getCandidates: async ({ query, searchType }) => {
-							const candidates = await this.contextGatheringService.searchCodebaseCandidates(query, searchType)
+						expandQuery: (messages) => this._expandSearchCodebaseQuery(messages.systemPrompt, messages.userPrompt),
+						getCandidates: async ({ query, searchType, extraTerms }) => {
+							const candidates = await this.contextGatheringService.searchCodebaseCandidates(query, searchType, { extraTerms })
 							loggedCandidates = candidates
 							console.log(`[Void][search_codebase][${queryId}] candidates ${JSON.stringify(summarizeSearchCodebaseCandidatesForLog(candidates), null, 2)}`)
 							return candidates
@@ -665,23 +669,75 @@ export class ToolsService implements IToolsService {
 					.join('\n\n')
 			},
 			search_codebase: (_params, result) => {
-				if (result.files.length === 0) {
-					return `${result.search_summary}${result.error ? `\nError: ${result.error}` : ''}\nSuggested next: ${result.suggested_next}`
+				const { search_summary, error, files, grounding_rules, suggested_next } = result
+				const header = `${search_summary}${error ? `\nError: ${error}` : ''}`
+				if (files.length === 0) {
+					return `${header}\nSuggested next: ${suggested_next}`
 				}
-				const renderedFiles = result.files
+				const renderedFiles = files
 					.map((file, index) => this._stringifySearchCodebaseFile(index, file))
 					.join('\n\n')
-				return `${result.search_summary}${result.error ? `\nError: ${result.error}` : ''}\n\n${renderedFiles}\n\nSuggested next: ${result.suggested_next}\n\nGROUNDING RULES:\n- Only cite or rank files that appear in the results above unless you first inspect additional files with a tool.\n- Do NOT invent filenames, directories, middleware layers, or services that are not present in the returned results.\n- If you need more certainty, call read_file on one of the returned files before answering.\n- Do NOT repeat the same search_codebase call with identical parameters.`
+
+				return `${header}\n\n${renderedFiles}\n\n${grounding_rules}\n\nSuggested next: ${suggested_next}`
 			},
 		}
-
-
 
 	}
 
 	private _stringifySearchCodebaseFile(index: number, file: SearchCodebaseResultFile): string {
 		const symbols = file.symbols.length ? file.symbols.join(', ') : '(none)'
-		return `Result ${index + 1}: ${file.path}\nRelevance: ${file.relevance}\nReason: ${file.reason}\nSymbols: ${symbols}\nPreview:\n${tripleTick[0]}\n${file.preview}\n${tripleTick[1]}`
+		return `### Result ${index + 1}: ${file.path}
+Full Path: ${file.fullPath}
+Relevance: ${file.relevance}
+Reason: ${file.reason}
+Symbols: ${symbols}
+Preview:
+${tripleTick[0]}
+${file.preview}
+${tripleTick[1]}`
+	}
+
+	private async _expandSearchCodebaseQuery(systemPrompt: string, userPrompt: string): Promise<string | null> {
+		const modelName = await this._selectSearchCodebaseModel()
+		if (!modelName) return null
+
+		return new Promise<string | null>((resolve) => {
+			let settled = false
+			let requestId: string | null = null
+
+			const settle = (value: string | null) => {
+				if (settled) return
+				settled = true
+				resolve(value)
+			}
+
+			timeout(5_000).then(() => {
+				if (requestId) {
+					this.llmMessageService.abort(requestId)
+				}
+				settle(null)
+			})
+
+			const messages: LLMChatMessage[] = [{ role: 'user', content: userPrompt }]
+			requestId = this.llmMessageService.sendLLMMessage({
+				messagesType: 'chatMessages',
+				messages,
+				separateSystemMessage: systemPrompt,
+				chatMode: null,
+				modelSelection: { providerName: 'localProxy', modelName },
+				modelSelectionOptions: undefined,
+				overridesOfModel: undefined,
+				onText: () => { },
+				onFinalMessage: ({ fullText }) => settle(fullText),
+				onError: () => settle(null),
+				onAbort: () => settle(null),
+				logging: { loggingName: 'Tool - search_codebase expander', loggingExtras: { modelName } },
+			})
+
+			if (!requestId) {
+				settle(null)
+			}
+		})
 	}
 
 	private async _rerankSearchCodebaseCandidates(systemPrompt: string, userPrompt: string): Promise<string | null> {
@@ -748,6 +804,8 @@ export class ToolsService implements IToolsService {
 		if (!models?.length) return null
 
 		const preferredModels = [
+			'codex-5.3',
+			'gpt-5.3-codex',
 			'gpt-4o-mini',
 			'gemini-2.0-flash-lite',
 			'gemini-2.0-flash',
@@ -756,7 +814,6 @@ export class ToolsService implements IToolsService {
 			'claude-3-5-haiku-latest',
 			'claude-sonnet-4-5',
 			'gpt-5-chat',
-			'gpt-5.3-codex',
 			'gemini-2.5-pro',
 			'gpt-5.4-pro',
 		]
