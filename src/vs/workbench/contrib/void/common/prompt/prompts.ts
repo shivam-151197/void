@@ -645,6 +645,9 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 - DO NOT nest parameters inside each other. For example, <uri> and <search_replace_blocks> must be siblings within the tool tag, NOT nested inside each other.
 - Incorrect: <edit_file><uri>path <content>...</content></uri></edit_file>
 - Correct: <edit_file><uri>path</uri><search_replace_blocks>...</search_replace_blocks></edit_file>
+- NEVER output multiple tool calls in a single response.
+- NEVER use XML attributes (e.g., <tool path="..."> is INVALID). You MUST pass parameters as nested XML tags.
+- NEVER use self-closing tags (e.g., <tool/> is INVALID). You MUST use explicit closing tags.
 - Failure to follow this XML schema will result in a tool execution error.`)
 
 	details.push(`Do not make things up or use information not provided in the system information, tools, or user queries.`)

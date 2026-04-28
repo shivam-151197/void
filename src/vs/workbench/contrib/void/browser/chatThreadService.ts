@@ -1446,7 +1446,7 @@ Important:
 				}
 
 				if (needsInitialDiscoveryRetry) {
-					correctiveRetryInstruction = 'Phase 1 incomplete. Output an XML discovery tool call now. Example: <search_codebase><query>...</query></search_codebase>'
+					correctiveRetryInstruction = 'Phase 1 incomplete. Output a discovery tool call now (e.g. search_codebase) to gather more context.'
 					console.warn(`[Void][AgentLoop][${threadId}] plan mode response arrived before any successful discovery tool results; scheduling discovery retry`);
 					shouldRetryLLM = true
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
@@ -1637,7 +1637,7 @@ Important:
 
 						this._addMessageToThread(threadId, {
 							role: 'user',
-							content: `Your previous tool call failed due to a syntax format error. You must fix the XML syntax and retry. Example: <search_codebase><query>...</query></search_codebase>`,
+							content: `Your previous tool call failed due to a syntax format error. You must fix the formatting syntax and retry.`,
 							state: { stagingSelections: [], isBeingEdited: false },
 							displayContent: `[Auto-continue: Syntax error nudge injected]`,
 						} as any)
