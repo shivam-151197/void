@@ -465,7 +465,7 @@ export type ChatSystemMessageParts = {
 	rulesBlock: string
 }
 
-export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, semanticSnippets, gatheredContext, chatMode: mode, mcpTools, includeXMLToolDefinitions, filesInspected, gitBranch, gitStatus }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], gatheredContext?: string, chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, filesInspected?: string[], gitBranch: string, gitStatus: string }): ChatSystemMessageParts => {
+export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, semanticSnippets, gatheredContext, chatMode: mode, mcpTools, includeXMLToolDefinitions, gitBranch, gitStatus }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], gatheredContext?: string, chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, gitBranch: string, gitStatus: string }): ChatSystemMessageParts => {
 	const header = (`You are an expert coding ${mode === 'agent' ? 'agent' : 'assistant'} whose job is \
 ${mode === 'agent' ? `to help the user develop, run, and make changes to their codebase.`
 			: mode === 'plan' ? `to plan and execute a coding task step-by-step.`
@@ -504,13 +504,6 @@ Here are some semantically relevant snippets from the codebase that might help y
 <semantic_context>
 ${semanticSnippets.join('\n\n')}
 </semantic_context>`)
-
-	const filesInspectedInfo = (!filesInspected || filesInspected.length === 0 ? '' : `
-Files you have already inspected in this session:
-<files_already_inspected>
-${filesInspected.map(f => `- ${f}`).join('\n')}
-</files_already_inspected>
-(Note: You do not need to read these files again unless you suspect they have changed.)`)
 
 	const gatheredContextInfo = (!gatheredContext ? '' : `
 Here is deterministic context gathered from the workspace for the user's latest task:
@@ -664,6 +657,10 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 - NEVER output standalone JSON tool calls as raw text. Only use the native tool calling schema provided by the API.`)
 	}
 
+	details.push(`TOOL CALL COMPLETION RULE:
+- Do NOT send any message without a tool call unless it is your FINAL message indicating the task is fully complete.
+- For every intermediate step, you MUST end your message with a tool call.`)
+
 	details.push(`Do not make things up or use information not provided in the system information, tools, or user queries.`)
 	details.push(`Always use MARKDOWN to format lists, bullet points, etc. Do NOT write tables.`)
 	details.push(`Every response may contain at most ONE tool call. Multiple consecutive tool calls are not supported.`)
@@ -681,7 +678,6 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 	identityStrs.push(fsInfo)
 	if (gatheredContextInfo) identityStrs.push(gatheredContextInfo)
 	if (semanticSnippets.length > 0) identityStrs.push(semanticInfo)
-	if (filesInspectedInfo) identityStrs.push(filesInspectedInfo)
 	if (toolDefinitions) identityStrs.push(toolDefinitions)
 
 	// Build rules block: condensed rules injected at high-recency position

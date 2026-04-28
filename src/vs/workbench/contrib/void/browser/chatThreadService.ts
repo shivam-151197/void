@@ -1087,6 +1087,17 @@ Important:
 			if (toolName === 'edit_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['edit_file']).uri }) }
 			if (toolName === 'rewrite_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['rewrite_file']).uri }) }
 
+			// intercept duplicate reads to save context memory
+			if (toolName === 'read_file' || toolName === 'search_in_file') {
+				const params = toolParams as BuiltinToolCallParams['read_file'] | BuiltinToolCallParams['search_in_file']
+				const fsPath = params.uri.fsPath
+				if (this._getFilesInspectedInCurrentThread(threadId).has(fsPath)) {
+					const errorMessage = `File ${fsPath} has already been inspected in this session. You do not need to read it again unless you suspect it has changed.`
+					this._addMessageToThread(threadId, { role: 'tool', type: 'tool_error', rawParams: opts.unvalidatedToolParams, params: toolParams, result: errorMessage, name: toolName, content: errorMessage, id: toolId, mcpServerName })
+					return { isRepetition: true }
+				}
+			}
+
 			// 2. if tool requires approval, break from the loop, awaiting approval
 
 			let approvalType = isBuiltInTool ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools';
@@ -1706,7 +1717,7 @@ Important:
 						// Inject a corrective user message into the thread so the model sees it
 						this._addMessageToThread(threadId, {
 							role: 'user',
-							content: `Task incomplete. You MUST emit an XML tool call now to continue.`,
+							content: `Task incomplete. You MUST emit a tool call now to continue.`,
 							state: { stagingSelections: [], isBeingEdited: false },
 							displayContent: `[Auto-continue: Nudge injected]`,
 						} as any)
@@ -1720,7 +1731,7 @@ Important:
 
 						this._addMessageToThread(threadId, {
 							role: 'user',
-							content: `Emit an XML tool call now. Example: <search_codebase><query>...</query></search_codebase>`,
+							content: `Incomplete response. You MUST emit a tool call now to gather more context or execute changes.`,
 							state: { stagingSelections: [], isBeingEdited: false },
 							displayContent: `[Auto-continue: Nudge injected]`,
 						} as any)
