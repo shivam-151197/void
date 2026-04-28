@@ -465,7 +465,7 @@ export type ChatSystemMessageParts = {
 	rulesBlock: string
 }
 
-export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, semanticSnippets, gatheredContext, chatMode: mode, mcpTools, includeXMLToolDefinitions, gitBranch, gitStatus }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], gatheredContext?: string, chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, gitBranch: string, gitStatus: string }): ChatSystemMessageParts => {
+export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, semanticSnippets, gatheredContext, chatMode: mode, mcpTools, includeXMLToolDefinitions, filesInspected, gitBranch, gitStatus }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], gatheredContext?: string, chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, filesInspected?: string[], gitBranch: string, gitStatus: string }): ChatSystemMessageParts => {
 	const header = (`You are an expert coding ${mode === 'agent' ? 'agent' : 'assistant'} whose job is \
 ${mode === 'agent' ? `to help the user develop, run, and make changes to their codebase.`
 			: mode === 'plan' ? `to plan and execute a coding task step-by-step.`
@@ -504,6 +504,13 @@ Here are some semantically relevant snippets from the codebase that might help y
 <semantic_context>
 ${semanticSnippets.join('\n\n')}
 </semantic_context>`)
+
+	const filesInspectedInfo = (!filesInspected || filesInspected.length === 0 ? '' : `
+Files you have already inspected in this session:
+<files_already_inspected>
+${filesInspected.map(f => `- ${f}`).join('\n')}
+</files_already_inspected>
+(Note: You do not need to read these files again unless you suspect they have changed.)`)
 
 	const gatheredContextInfo = (!gatheredContext ? '' : `
 Here is deterministic context gathered from the workspace for the user's latest task:
@@ -639,7 +646,8 @@ Always bias towards writing as little as possible - NEVER write the whole file. 
 Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 	}
 
-	details.push(`TOOL CALL FORMATTING:
+	if (includeXMLToolDefinitions) {
+		details.push(`TOOL CALL FORMATTING:
 - Every tool call must follow the "Format" section in the tool definitions exactly.
 - Tag names are case-sensitive and must use snake_case (e.g., <search_replace_blocks>, NOT <searchReplaceBlocks>).
 - DO NOT nest parameters inside each other. For example, <uri> and <search_replace_blocks> must be siblings within the tool tag, NOT nested inside each other.
@@ -649,6 +657,12 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 - NEVER use XML attributes (e.g., <tool path="..."> is INVALID). You MUST pass parameters as nested XML tags.
 - NEVER use self-closing tags (e.g., <tool/> is INVALID). You MUST use explicit closing tags.
 - Failure to follow this XML schema will result in a tool execution error.`)
+	} else {
+		details.push(`TOOL CALL FORMATTING:
+- The user's system supports NATIVE function calling. You must exclusively use the provided JSON function tools natively.
+- NEVER output XML-based tool calls (like <search_codebase>...</search_codebase>) in your raw text response.
+- NEVER output standalone JSON tool calls as raw text. Only use the native tool calling schema provided by the API.`)
+	}
 
 	details.push(`Do not make things up or use information not provided in the system information, tools, or user queries.`)
 	details.push(`Always use MARKDOWN to format lists, bullet points, etc. Do NOT write tables.`)
@@ -667,6 +681,7 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 	identityStrs.push(fsInfo)
 	if (gatheredContextInfo) identityStrs.push(gatheredContextInfo)
 	if (semanticSnippets.length > 0) identityStrs.push(semanticInfo)
+	if (filesInspectedInfo) identityStrs.push(filesInspectedInfo)
 	if (toolDefinitions) identityStrs.push(toolDefinitions)
 
 	// Build rules block: condensed rules injected at high-recency position

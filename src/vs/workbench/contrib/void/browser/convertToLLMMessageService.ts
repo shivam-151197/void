@@ -588,7 +588,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 
 	// system message
-	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined, semanticSnippets: string[] = [], gatheredContext: string = '') => {
+	private _generateChatMessagesSystemMessage = async (chatMessages: ChatMessage[], chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined, semanticSnippets: string[] = [], gatheredContext: string = '') => {
 		const workspaceFolders = this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath)
 
 		// Fetch git info
@@ -622,7 +622,19 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		}
 
 		const persistentTerminalIDs = this.terminalToolService.listPersistentTerminalIds()
-		const systemMessageParts: ChatSystemMessageParts = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, semanticSnippets, gatheredContext, chatMode, mcpTools, includeXMLToolDefinitions, gitBranch: gitInfo.branch, gitStatus: gitInfo.status })
+
+		const filesInspectedSet = new Set<string>()
+		for (const m of chatMessages) {
+			if (m.role === 'tool' && (m.type === 'success' || m.type === 'tool_error' || m.type === 'rejected')) {
+				if (m.name === 'read_file' || m.name === 'rewrite_file' || m.name === 'edit_file' || m.name === 'search_in_file') {
+					const uri = (m.params as any).uri
+					if (uri) filesInspectedSet.add(uri.fsPath || uri)
+				}
+			}
+		}
+		const filesInspected = Array.from(filesInspectedSet)
+
+		const systemMessageParts: ChatSystemMessageParts = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, semanticSnippets, gatheredContext, chatMode, mcpTools, includeXMLToolDefinitions, filesInspected, gitBranch: gitInfo.branch, gitStatus: gitInfo.status })
 		return systemMessageParts
 	}
 
@@ -751,7 +763,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		console.log(`[Void][prepareLLMChatMessages] semantic snippets ready in ${Date.now() - semanticStart}ms (count=${semanticSnippets.length}, mode=${chatMode})`);
 
 		const systemMessageStart = Date.now();
-		const systemMessageParts = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat, semanticSnippets, gatheredContext)
+		const systemMessageParts = await this._generateChatMessagesSystemMessage(chatMessages, chatMode, specialToolFormat, semanticSnippets, gatheredContext)
 		console.log(`[Void][prepareLLMChatMessages] system message built in ${Date.now() - systemMessageStart}ms (mode=${chatMode}, semanticSnippets=${semanticSnippets.length})`);
 		const planJournalContext = chatMode === 'plan' ? this._buildPlanTaskJournalContext(chatMessages) : ''
 
