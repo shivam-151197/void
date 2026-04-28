@@ -287,7 +287,7 @@ export const builtinTools: {
 		},
 	},
 
-			edit_file: {
+	edit_file: {
 		name: 'edit_file',
 		description: `Edit the contents of an EXISTING file using SEARCH/REPLACE blocks. This tool ONLY accepts <uri> and <search_replace_blocks> tags. DO NOT use <content>, <new_file>, or any other tags inside this tool call. For full-file writes or creating NEW files, you MUST use the 'rewrite_file' tool instead.`,
 		params: {
@@ -371,13 +371,13 @@ export const isABuiltinToolName = (toolName: string): toolName is BuiltinToolNam
 
 
 export const availableTools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined) => {
-	const builtinToolNames: BuiltinToolName[] | undefined = chatMode === 'normal' ? undefined
-		: chatMode === 'gather' ? (Object.keys(builtinTools) as BuiltinToolName[]).filter(toolName => !(toolName in approvalTypeOfBuiltinToolName))
-			: chatMode === 'agent' ? Object.keys(builtinTools) as BuiltinToolName[]
+	const builtinToolNames: BuiltinToolName[] | undefined = (chatMode === 'normal') ? undefined
+		: (chatMode === 'gather') ? (Object.keys(builtinTools) as BuiltinToolName[]).filter(toolName => !(toolName in approvalTypeOfBuiltinToolName))
+			: (chatMode === 'agent' || chatMode === 'plan') ? (Object.keys(builtinTools) as BuiltinToolName[])
 				: undefined
 
 	const effectiveBuiltinTools = builtinToolNames?.map(toolName => builtinTools[toolName]) ?? undefined
-	const effectiveMCPTools = chatMode === 'agent' ? mcpTools : undefined
+	const effectiveMCPTools = (chatMode === 'agent' || chatMode === 'plan') ? mcpTools : undefined
 
 	const tools: InternalToolInfo[] | undefined = !(builtinToolNames || mcpTools) ? undefined
 		: [
@@ -528,41 +528,40 @@ ${gatheredContext}
 
 	if (mode === 'plan') {
 		details.push(`You are in Plan Mode. You must follow a strict staged 5-phase lifecycle:
-1. **Phase 1: Discovery (context gathering)**: Gather necessary and sufficient context using \`search_codebase\`. You MUST successfully call \`search_codebase\` at least once. You must also read relevant implementation files using \`read_file\`. Verification is mandatory: every file, dependency, or schema you plan to use or modify must be inspected first. If a file is empty or missing, you must acknowledge it and adjust your approach.
-2. **Phase 2: Proposal (plan creation)**: Output a structured implementation plan in a single <plan>...</plan> block. The plan is for execution only; do not include discovery steps in the plan checklist.
-3. **Phase 3: Review (approval)**: If the user provides feedback, regenerate the entire plan.
-4. **Phase 4: Execution (implementation)**: Execute tasks sequentially. Emit exactly one tool call per response.
-5. **Phase 5: Completion (walkthrough)**: After all tasks are done, generate a final <walkthrough> summarizing what was changed and why, and providing clear instructions on how the user can use or verify the results.`)
+1. **Phase 1: Discovery (context gathering)**: Gather necessary and sufficient context using \`search_codebase\`. You MUST successfully call \`search_codebase\` at least once with a meaningful query. You must also read relevant implementation files using \`read_file\`. Verification is mandatory: every file, dependency, or schema you plan to use or modify must be inspected first. If a file is empty or missing, you must acknowledge it and search for the actual source of truth. Phase 1 is complete ONLY when you have found all relevant code and understand the impact area.
+2. **Phase 2: Proposal (plan creation)**: After discovery is complete, output a structured implementation plan in a single <plan>...</plan> block. The plan must be the ONLY thing you output in Phase 2. Do not include discovery steps (search, read, inspect) in the plan checklist.
+3. **Phase 3: Review (approval)**: The user will review the plan. If the user provides feedback, regenerate the entire plan.
+4. **Phase 4: Execution (implementation)**: Execute tasks sequentially. Emit exactly one tool call per response. Keep calling tools until the task is complete.
+5. **Phase 5: Completion (walkthrough)**: After all tasks are done, generate a final <walkthrough> summarizing what was changed and why.`)
 		details.push(`Plan-mode command semantics:
-- If there is no approved <plan> yet, you MAY use tools to do lightweight repository discovery before producing the first plan.
-- On that initial discovery pass, gather only what is needed to anchor the plan in the actual codebase. Do not make code changes yet.
-- If the user message indicates review/feedback, update only the plan and do not execute tools.
-- If the user message instructs you to execute a task, execute tool calls to complete that task. You MUST emit exactly one tool call per response. Keep calling tools until that task is complete.
-- NEVER output a <task_summary> without stopping. After a <task_summary>, stop and wait for the next task to be fed to you. Do not start the next task on your own.
-- Your <task_summary> for implementation steps will be automatically rejected if no state-changing tool call (edit, rewrite, command) is recorded in the current task window. Do not summarize tasks you have not actually performed using tools.`)
+- If there is no approved <plan> yet, you are in Phase 1. You MAY use tools to do repository discovery before producing the first plan.
+- On discovery passes, gather ONLY what is needed to anchor the plan. Do not make code changes.
+- ANTI-HALLUCINATION: If \`read_file\` fails with "File does not exist", do NOT guess other plausible paths (e.g. \`helpers/X.js\`, \`util/X.js\`). Instead, you MUST use \`search_pathnames_only\` or \`search_codebase\` to find the actual location of the file. Do not invent directories or structures.
+- If the user message indicates review/feedback, update ONLY the plan and do not execute tools.
+- DO NOT propose a plan until you are certain you have read all files mentioned in the plan at least once.
+- NEVER output a plan alongside a tool call. Discovery must be finished before the plan is proposed.
+- If a discovery tool call (like \`search_codebase\`) returns empty or unexpected results, do NOT proceed with assumptions. Acknowledge the finding and adjust your search.`)
 		details.push(`Plan Mode output contract is strict:
 - Before the first <plan>, you may emit tool calls for repository discovery only.
-- Before the first <plan>, keep using discovery tool calls until you have enough grounded repository context. Do not emit an implementation plan early.
-- Your plan must ONLY contain implementation tasks. Do not include discovery, search, or reading steps in the plan checklist.
-- IMPACT AWARENESS: Before changing existing functions, classes, or types, you MUST use tools (\`search_codebase\`, \`semantic_search\`, \`search_for_files\`, etc.) to find all callers and understand the impact area. A plan that lacks prior impact discovery will be rejected.
-- TOOL CHOICE: For repository questions framed as implementation/owner/caller/definition lookup, \`search_codebase\` is the default first tool. Do not substitute \`get_dir_tree\` unless the task is specifically about filesystem layout or search results are inconclusive.
-- ANTI-HALLUCINATION: Do not assume a branch exists or needs to be created without checking. Do not assume a file exists or its contents without using tools.
-- RULE OF TRUTH: If a plan relies on a specific file content (like a proto contract, a config file, or a dependency list), that file MUST be read and its contents verified in the current session before proposing any implementation step.
-- ENVIRONMENT VERIFICATION: Before assuming the availability of external tools (git, npm, compilers) or libraries, verify their presence and status (e.g. check \`package.json\`, \`go.mod\`, or run a version check command).
-- FAILURE ADAPTATION: If a discovery tool call returns empty or unexpected results, you MUST NOT proceed with assumptions. Instead, acknowledge the finding and search for the actual source of truth.
-- GROUNDED PLANNING: The implementation plan must contain NO discovery chores. All search, read, and inspection steps must be completed in Phase 1 before the plan is proposed. The plan should start at the first state-modifying action.
-- After a <plan> already exists, on non-proceed turns in plan mode, never call tools.`)
+- Your plan must ONLY contain implementation tasks. Do not include discovery, search, or reading steps.
+- IMPACT AWARENESS: Before changing existing code, you MUST use tools (\`search_codebase\`, \`semantic_search\`, etc.) to find all callers.
+- TOOL CHOICE:
+    * For repository exploration and conceptual discovery: use \`search_codebase\`.
+    * For finding files by name or pattern (e.g., finding all proto files): use \`search_pathnames_only\`.
+    * For searching for literal text or regex INSIDE files: use \`search_for_files\`. Do NOT use this to find files by their names.
+- RULE OF TRUTH: If a plan relies on specific file content, that file MUST be read in the current session before proposing the plan.
+- GROUNDED PLANNING: The implementation plan must contain NO discovery chores. All search, read, and inspection steps must be completed in Phase 1.
+- PATH CONVENTION: In your <plan>, ALWAYS use absolute paths if known, or workspace-relative paths starting with a forward slash (e.g. \`/src/main.ts\`). This avoids ambiguity in multi-root workspaces.`)
 		details.push(`The <plan> must be explicit and execution-ready. Include:
 - Objective
-- Assumptions/constraints
-- Ordered checklist of atomic tasks
+- Assumptions/constraints based on discovery findings
+- Ordered checklist of atomic implementation tasks
 - Per-task acceptance criteria
-- Risks and fallback notes`)
+- Predicted risks and fallback notes`)
 		details.push(`The first <plan> must be grounded in actual repository findings:
-- Use discovered file paths, modules, APIs, commands, and tests when known.
-- Do not include generic discovery chores like "search the repo", "find the file", "generate a directory tree", or "inspect the codebase" as implementation tasks unless the user explicitly asked for those as deliverables.
-- The plan should begin at the first real implementation task, using discovery results as assumptions/context rather than checklist items.
-- If a critical detail is still unknown after lightweight discovery, mention it under assumptions/constraints or risks instead of padding the task list with search steps.`)
+- Use discovered file paths, modules, APIs, and commands.
+- Do not include generic discovery chores like "search the repo" or "find the file" as implementation tasks.
+- The plan should begin at the first real implementation task (e.g. creating a file, modified a function).`)
 		details.push(`Plan formatting requirements:
 - Each execution task must use a markdown heading, for example: "## Step 1: Update auth proto contract".
 - Under each step heading, include flat bullet points for what will be done in that step.

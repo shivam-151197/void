@@ -691,8 +691,8 @@ Important:
 	private async _persistPlanArtifactsFromAssistant(threadId: string, assistantText: string) {
 		const plan = extractTagBlock(assistantText, 'plan')
 		if (plan) {
-			await this._writeWorkspaceFile('implementation_plan.md.resolved', formatStructuredMarkdownBlock(plan, 'Implementation Plan'))
-			await this._openWorkspaceFile('implementation_plan.md.resolved')
+			await this._writeWorkspaceFile('implementation_plan.md', formatStructuredMarkdownBlock(plan, 'Implementation Plan'))
+			await this._openWorkspaceFile('implementation_plan.md')
 		}
 
 		const walkthrough = extractTagBlock(assistantText, 'walkthrough')
@@ -702,15 +702,25 @@ Important:
 		}
 	}
 
-	private _getFilesReadInCurrentThread(threadId: string): Set<string> {
+	private _getFilesInspectedInCurrentThread(threadId: string): Set<string> {
 		const thread = this.state.allThreads[threadId]
 		if (!thread) return new Set()
 		const files = new Set<string>()
 		for (const m of thread.messages) {
-			if (m.role === 'tool' && m.type === 'success') {
-				if (m.name === 'read_file' || m.name === 'rewrite_file' || m.name === 'edit_file' || m.name === 'search_in_file') {
-					const uri = (m.params as any).uri
-					if (uri) files.add(uri.fsPath || uri)
+			if (m.role === 'tool') {
+				// Count successful reads/edits
+				if (m.type === 'success') {
+					if (m.name === 'read_file' || m.name === 'rewrite_file' || m.name === 'edit_file' || m.name === 'search_in_file') {
+						const uri = (m.params as any).uri
+						if (uri) files.add(uri.fsPath || uri)
+					}
+				}
+				// Count failed read attempts as 'inspected' (so agent can conclude a file doesn't exist)
+				else if (m.type === 'tool_error' || m.type === 'rejected') {
+					if (m.name === 'read_file') {
+						const uri = (m.params as any).uri
+						if (uri) files.add(uri.fsPath || uri)
+					}
 				}
 			}
 		}
@@ -886,7 +896,7 @@ Important:
 		if (!planMessage || planMessage.role !== 'assistant') return []
 
 		const plan = extractTagBlock(planMessage.displayContent, 'plan') ?? ''
-		
+
 		// Map headings as distinct tasks
 		let allTasks = plan.split(/(?:^|\n)(?=##\s+)/)
 			.filter(s => s.trim().startsWith('##'))
@@ -1169,7 +1179,7 @@ Important:
 		if (toolName === 'edit_file' || toolName === 'rewrite_file') {
 			const uri = (toolParams as any).uri
 			const fsPath = uri?.fsPath || uri
-			if (fsPath && !this._getFilesReadInCurrentThread(threadId).has(fsPath)) {
+			if (fsPath && !this._getFilesInspectedInCurrentThread(threadId).has(fsPath)) {
 				const errorMsg = `Error: You are trying to edit ${fsPath} but you haven't read it in this session yet. You MUST read a file to understand its content and context before making changes. Please use read_file first.`
 				this._updateLatestTool(threadId, { role: 'tool', type: 'tool_error', params: toolParams, result: errorMsg, name: toolName, content: errorMsg, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
 				return {}
@@ -1285,15 +1295,15 @@ Important:
 				let resMessageIsDonePromise: (res: ResTypes) => void // resolves when user approves this tool use (or if tool doesn't require approval)
 				const messageIsDonePromise = new Promise<ResTypes>((res, rej) => { resMessageIsDonePromise = res })
 
-					const outboundMessages: LLMChatMessage[] = correctiveRetryInstruction
-						? [
-							...messages,
-							{
-								role: 'user',
-								content: correctiveRetryInstruction,
-							} as LLMChatMessage
-						]
-						: messages
+				const outboundMessages: LLMChatMessage[] = correctiveRetryInstruction
+					? [
+						...messages,
+						{
+							role: 'user',
+							content: correctiveRetryInstruction,
+						} as LLMChatMessage
+					]
+					: messages
 				if (correctiveRetryInstruction) {
 					console.warn(`[Void][AgentLoop][${threadId}] retrying iteration=${nMessagesSent} with corrective plan instruction`);
 				}
@@ -1508,23 +1518,45 @@ Important:
 
 				// Plan Grounding Verification
 				if (chatMode === 'plan' && hasPlanBlock) {
-					const filesRead = this._getFilesReadInCurrentThread(threadId)
-					// Simple heuristic to find paths in plan
-					const pathsInPlan = (extractedPlan.match(/(?:\/|[A-Za-z]:\\)[\w\-\.\/\\\ ]+/g) || [])
-						.map(p => p.trim())
-						.filter(p => p.includes('.') && !p.endsWith('/')) // look for files with extensions
+					const filesInspected = this._getFilesInspectedInCurrentThread(threadId)
+					const workspaceFolders = this._workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath)
 
-					const unreadFiles = pathsInPlan.filter(p => !filesRead.has(p))
-					if (unreadFiles.length > 0) {
+					// Heuristic to find paths in plan, and normalize them to absolute
+					const rawPathsInPlan = (extractedPlan.match(/(?:\/|[A-Za-z]:\\)[\w\-\.\/\\\ ]+/g) || [])
+						.map(p => p.trim())
+						.filter(p => (p.includes('.') || p.includes('/') || p.includes('\\')) && !p.endsWith('/') && !p.endsWith('\\'))
+
+					const pathsInPlan = rawPathsInPlan.map(p => {
+						// If already absolute, return as is
+						if (p.startsWith('/') || /^[A-Za-z]:\\/.test(p)) {
+							// Check if it exists in filesInspected as is
+							if (filesInspected.has(p)) return p
+							// If starts with /, try prepending workspace folders
+							if (p.startsWith('/')) {
+								for (const f of workspaceFolders) {
+									const abs = (f + p).replace(/\/\//g, '/')
+									if (filesInspected.has(abs)) return abs
+								}
+							}
+						}
+						return p
+					})
+
+					const uninspectedFiles = rawPathsInPlan.filter((rawP, i) => {
+						const absP = pathsInPlan[i]
+						return !filesInspected.has(absP) && !filesInspected.has(rawP)
+					})
+
+					if (uninspectedFiles.length > 0) {
 						correctiveRetryInstruction = [
 							'Your <plan> references implementation files that have not been inspected yet:',
-							...unreadFiles.map(f => `- ${f}`),
+							...uninspectedFiles.map(f => `- ${f}`),
 							'',
 							'You MUST read and understand these files using read_file BEFORE proposing an implementation plan.',
 							'This ensures your plan is grounded in the actual codebase state and avoids assumptions.',
 							'Please perform the necessary discovery now, and then re-propose the plan.',
 						].join('\n')
-						console.warn(`[Void][AgentLoop][${threadId}] plan rejected due to unread grounding files:`, unreadFiles);
+						console.warn(`[Void][AgentLoop][${threadId}] plan rejected due to uninspected grounding files:`, uninspectedFiles);
 						shouldRetryLLM = true
 						this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
 						continue
@@ -1598,6 +1630,11 @@ Important:
 					const recordedTaskSummary = chatMode === 'plan'
 						? await this._recordPlanTaskSummaryIfPresent(threadId, info.fullText)
 						: false
+
+					if (chatMode === 'plan' && !toolCall && !hasTaskSummary && !hasWalkthrough && isPlanProposal) {
+						console.log(`[Void][AgentLoop][${threadId}] plan proposed; awaiting user review/proceed`);
+						isRunningWhenEnd = 'awaiting_user'
+					}
 					const pendingTasks = (chatMode === 'plan' || chatMode === 'agent') ? this._getPendingTasks(threadId) : []
 					const pendingSteps = pendingTasks.length
 
@@ -1640,6 +1677,20 @@ Important:
 							shouldSendAnotherMessage = true
 							this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' })
 						}
+					}
+					else if (chatMode === 'plan' && hasWalkthrough && this._successfulToolMessagesForCurrentTask(threadId, { onlyMutating: true }).length === 0 && autoContinueNudges < MAX_AUTO_CONTINUE_NUDGES) {
+						autoContinueNudges++
+						console.warn(`[Void][AgentLoop][${threadId}] model emitted walkthrough without successful tool evidence; injecting corrective nudge ${autoContinueNudges}/${MAX_AUTO_CONTINUE_NUDGES}`)
+
+						this._addMessageToThread(threadId, {
+							role: 'user',
+							content: `Your <walkthrough> was not accepted because no state-changing tool call (edit, rewrite, command) successfully completed in the recent turn. You cannot be finished yet. Please execute real tool calls to implement the changes before providing a walkthrough.`,
+							state: { stagingSelections: [], isBeingEdited: false },
+							displayContent: `[Auto-continue: Walkthrough rejected]`,
+						} as any)
+
+						shouldSendAnotherMessage = true
+						this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' })
 					}
 					else if (pendingSteps > 0 && !hasWalkthrough && !isPlanProposal && autoContinueNudges < MAX_AUTO_CONTINUE_NUDGES) {
 						autoContinueNudges++

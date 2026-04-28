@@ -126,13 +126,32 @@ const EXCLUDED_SEGMENTS = new Set([
 	'cache',
 	'resource',
 	'resources',
+	'docs',
+	'documentation',
+	'swagger',
+	'openapi',
+	'gen',
+	'generated',
+	'lib',
+	'external',
+	'third_party',
+	'deps',
+	'apiDoc',
+	'apidocs',
 ]);
 
 const BINARY_EXTENSIONS = new Set([
 	'.7z', '.avif', '.bin', '.bmp', '.class', '.db', '.dll', '.dmg', '.exe', '.gif', '.gz',
 	'.ico', '.jar', '.jpeg', '.jpg', '.lockb', '.mov', '.mp3', '.mp4', '.o', '.pdf', '.png',
 	'.rlib', '.so', '.sqlite', '.tar', '.tgz', '.wasm', '.webp', '.woff', '.woff2', '.zip',
+	'.lib', '.a', '.dylib',
 ]);
+
+const DOC_EXTENSIONS = new Set([
+	'.md', '.txt', '.rst', '.adoc', '.doc', '.docx', '.pdf', '.odt', '.rtf', '.map',
+]);
+
+const SWAGGER_INDICATORS = ['swagger', 'openapi'];
 
 const EXCLUDED_BASENAMES = new Set([
 	'void_agent_session.json',
@@ -310,6 +329,14 @@ const extractEvidenceSnippets = (content: string, terms: string[], maxSnippets: 
 			if (!line) {
 				continue;
 			}
+
+			// skip comment-only lines
+			const trimmedLine = line.trim();
+			const isPureComment = /^\s*(\/\/|\/\*|\*|\#|\;|\-\-)/.test(trimmedLine);
+			if (isPureComment) {
+				continue;
+			}
+
 			const normalizedLine = line.toLowerCase();
 			if (!exactRegex.test(line) && !normalizedLine.includes(term)) {
 				continue;
@@ -817,8 +844,19 @@ export const shouldIncludeContextPath = (path: string): boolean => {
 	if (EXCLUDED_BASENAMES.has(lastSegment) || lastSegment.endsWith('.resolved')) {
 		return false;
 	}
+
+	// Swagger/OpenAPI check
+	if (SWAGGER_INDICATORS.some(ind => lastSegment.includes(ind))) {
+		return false;
+	}
+
 	const dotIndex = lastSegment.lastIndexOf('.');
 	const extension = dotIndex === -1 ? '' : lastSegment.slice(dotIndex);
+
+	if (DOC_EXTENSIONS.has(extension)) {
+		return false;
+	}
+
 	return !BINARY_EXTENSIONS.has(extension);
 };
 

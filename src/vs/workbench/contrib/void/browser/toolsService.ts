@@ -23,6 +23,7 @@ import { IVoidIndexService } from '../common/index/indexServiceTypes.js'
 import { IContextGatheringService } from './contextGatheringService.js'
 import { ILLMMessageService } from '../common/sendLLMMessageService.js'
 import { SearchCodebaseParams, SearchCodebaseResultFile, runSearchCodebase } from '../common/contextGathering/searchCodebaseTool.js'
+import { shouldIncludeContextPath } from '../common/contextGathering/contextGatherer.js'
 
 
 // tool use for AI
@@ -409,6 +410,7 @@ export class ToolsService implements IToolsService {
 				const fromIdx = MAX_CHILDREN_URIs_PAGE * (pageNumber - 1)
 				const toIdx = MAX_CHILDREN_URIs_PAGE * pageNumber - 1
 				const uris = data.results
+					.filter(({ resource }) => shouldIncludeContextPath(resource.fsPath))
 					.slice(fromIdx, toIdx + 1) // paginate
 					.map(({ resource, results }) => resource)
 
@@ -431,6 +433,7 @@ export class ToolsService implements IToolsService {
 				const fromIdx = MAX_CHILDREN_URIs_PAGE * (pageNumber - 1)
 				const toIdx = MAX_CHILDREN_URIs_PAGE * pageNumber - 1
 				const uris = data.results
+					.filter(({ resource }) => shouldIncludeContextPath(resource.fsPath))
 					.slice(fromIdx, toIdx + 1) // paginate
 					.map(({ resource, results }) => resource)
 

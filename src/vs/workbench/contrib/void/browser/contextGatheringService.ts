@@ -545,7 +545,7 @@ class ContextGatheringService extends Disposable implements IContextGatheringSer
 			// Remove empty lines and lines with only comments
 			.filter(line => {
 				const trimmed = line.trim();
-				return trimmed && !/^\/\/+$/.test(trimmed);
+				return trimmed && !/^\s*(\/\/|\/\*|\*|\#|\;|\-\-)/.test(trimmed);
 			})
 			// Rejoin with newlines
 			.join('\n')
