@@ -435,6 +435,9 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
 	const toolCallXMLGuidelines = (`\
     Tool calling rules:
     - Write the tool name and parameters using the XML format shown above. ONE tool call per response, placed at the END.
+    - NEVER output multiple tool calls in a single response.
+    - NEVER use XML attributes (e.g., <tool path="..."> is INVALID). You MUST pass parameters as nested XML tags.
+    - NEVER use self-closing tags (e.g., <tool/> is INVALID). You MUST use explicit closing tags.
     - After writing the tool call, STOP. The result will be returned and you will be called again.
     - All parameters are REQUIRED unless marked Optional.
     - Keep calling tools until the task is fully complete. A response with NO tool call signals you are DONE.
