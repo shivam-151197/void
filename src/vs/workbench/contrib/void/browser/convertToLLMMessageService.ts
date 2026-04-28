@@ -7,7 +7,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { ChatMessage } from '../common/chatThreadServiceTypes.js';
 import { getIsReasoningEnabledState, getReservedOutputTokenSpace, getModelCapabilities } from '../common/modelCapabilities.js';
-import { reParsedToolXMLString, chat_systemMessage } from '../common/prompt/prompts.js';
+import { reParsedToolXMLString, chat_systemMessage, ChatSystemMessageParts } from '../common/prompt/prompts.js';
 import { AnthropicLLMChatMessage, AnthropicReasoning, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, OpenAILLMChatMessage, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { IVoidSettingsService } from '../common/voidSettingsService.js';
 import { ChatMode, FeatureName, ModelSelection, ProviderName } from '../common/voidSettingsTypes.js';
@@ -622,8 +622,8 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		}
 
 		const persistentTerminalIDs = this.terminalToolService.listPersistentTerminalIds()
-		const systemMessage = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, semanticSnippets, gatheredContext, chatMode, mcpTools, includeXMLToolDefinitions, gitBranch: gitInfo.branch, gitStatus: gitInfo.status })
-		return systemMessage
+		const systemMessageParts: ChatSystemMessageParts = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, semanticSnippets, gatheredContext, chatMode, mcpTools, includeXMLToolDefinitions, gitBranch: gitInfo.branch, gitStatus: gitInfo.status })
+		return systemMessageParts
 	}
 
 
@@ -751,10 +751,14 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		console.log(`[Void][prepareLLMChatMessages] semantic snippets ready in ${Date.now() - semanticStart}ms (count=${semanticSnippets.length}, mode=${chatMode})`);
 
 		const systemMessageStart = Date.now();
-		const fullSystemMessage = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat, semanticSnippets, gatheredContext)
+		const systemMessageParts = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat, semanticSnippets, gatheredContext)
 		console.log(`[Void][prepareLLMChatMessages] system message built in ${Date.now() - systemMessageStart}ms (mode=${chatMode}, semanticSnippets=${semanticSnippets.length})`);
 		const planJournalContext = chatMode === 'plan' ? this._buildPlanTaskJournalContext(chatMessages) : ''
-		const systemMessage = disableSystemMessage ? '' : [fullSystemMessage, planJournalContext].filter(Boolean).join('\n\n');
+
+		// Combine identity + rules blocks; rules block is kept separate so we can inject it as a synthetic turn later
+		const { identityBlock, rulesBlock } = systemMessageParts
+		const fullSystemMessage = disableSystemMessage ? '' : [identityBlock, planJournalContext].filter(Boolean).join('\n\n')
+		const systemMessage = fullSystemMessage
 
 		const modelSelectionOptions = this.voidSettingsService.state.optionsOfModelSelection['Chat'][modelSelection.providerName]?.[modelSelection.modelName]
 
@@ -763,6 +767,22 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const isReasoningEnabled = getIsReasoningEnabledState('Chat', providerName, modelName, modelSelectionOptions, overridesOfModel)
 		const reservedOutputTokenSpace = getReservedOutputTokenSpace(providerName, modelName, { isReasoningEnabled, overridesOfModel })
 		const llmMessages = this._chatMessagesToSimpleMessages(chatMessages)
+
+		// --- Synthetic priming turn injection ---
+		// On the very first turn (no assistant or tool messages yet), inject a synthetic user turn
+		// that repeats the critical rule enforcement just before the real user message.
+		// This exploits recency bias: the model's attention weights are highest on the last few turns.
+		const isFirstTurn = !chatMessages.some(m => m.role === 'assistant' || m.role === 'tool')
+		const supportsMultiTurnInjection = (chatMode === 'agent' || chatMode === 'plan' || chatMode === 'gather')
+		if (!disableSystemMessage && isFirstTurn && supportsMultiTurnInjection && rulesBlock && llmMessages.length > 0) {
+			// Insert synthetic user turn as the second-to-last message (before the real user message)
+			const primingTurn: SimpleLLMMessage = {
+				role: 'user',
+				content: rulesBlock,
+			}
+			llmMessages.splice(llmMessages.length - 1, 0, primingTurn)
+			console.log(`[Void][prepareLLMChatMessages] injected synthetic priming turn (rulesBlock chars=${rulesBlock.length})`);
+		}
 
 		const { messages, separateSystemMessage } = prepareMessages({
 			messages: llmMessages,

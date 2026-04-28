@@ -393,12 +393,23 @@ export const availableTools = (chatMode: ChatMode | null, mcpTools: InternalTool
 
 const toolCallDefinitionsXMLString = (tools: InternalToolInfo[]) => {
 	return `${tools.map((t, i) => {
-		const params = Object.keys(t.params).map(paramName => `<${paramName}>${t.params[paramName].description}</${paramName}>`).join('\n')
+		const paramsList = Object.keys(t.params).map(paramName => {
+			const desc = t.params[paramName].description;
+			const isOptional = desc.toLowerCase().startsWith('optional');
+			const label = isOptional ? 'OPTIONAL' : 'REQUIRED';
+			return `      - <${paramName}>: [${label}] ${desc}`
+		}).join('\n')
+
+		const exampleCall = Object.keys(t.params).map(paramName => `    <${paramName}>...</${paramName}>`).join('\n')
+
 		return `\
     ${i + 1}. ${t.name}
     Description: ${t.description}
-    Format:
-    <${t.name}>${!params ? '' : `\n${params}`}
+    Parameters:
+${paramsList || '      (No parameters)'}
+    Usage Format:
+    <${t.name}>
+${exampleCall}
     </${t.name}>`
 	}).join('\n\n')}`
 }
@@ -412,7 +423,6 @@ export const reParsedToolXMLString = (toolName: ToolName, toolParams: RawToolPar
 }
 
 /* We expect tools to come at the end - not a hard limit, but that's just how we process them, and the flow makes more sense that way. */
-// - You are allowed to call multiple tools by specifying them consecutively. However, there should be NO text or writing between tool calls or after them.
 const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined) => {
 	const tools = availableTools(chatMode, mcpTools)
 	if (!tools || tools.length === 0) return null
@@ -423,15 +433,18 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
     ${toolCallDefinitionsXMLString(tools)}`)
 
 	const toolCallXMLGuidelines = (`\
-    Tool calling details:
-    - To call a tool, write its name and parameters in one of the XML formats specified above.
-    - Each response may contain at most ONE tool call, placed at the END of the response.
-    - After you write the tool call, STOP this response. The tool result will be returned to you and you will be called again to continue.
-    - All parameters are REQUIRED unless noted otherwise.
-    - Do NOT stop working after a single tool call. You will be called repeatedly — keep calling tools until the entire task is complete.
-    - Returning a response with NO tool call signals that you are DONE with all work.
-    - Tool results will be returned to you wrapped in a result tag of the same name (e.g. <tool_name_result>).
-    - DO NOT USE external or alternate tool formats such as <run> or <apply_patch>. These are INVALID. You must ONLY use the exact XML tool tags defined above (e.g. <run_command>, <edit_file>).`)
+    Tool calling rules:
+    - Write the tool name and parameters using the XML format shown above. ONE tool call per response, placed at the END.
+    - After writing the tool call, STOP. The result will be returned and you will be called again.
+    - All parameters are REQUIRED unless marked Optional.
+    - Keep calling tools until the task is fully complete. A response with NO tool call signals you are DONE.
+    - Tool results come back wrapped in a result tag: <tool_name_result>...</tool_name_result>.
+    - ONLY use the exact XML tool tags defined above. Formats like <run> or <apply_patch> are INVALID.
+
+    EXAMPLE — correct first response to a repository task:
+    <search_codebase>
+    <query>authentication service implementation</query>
+    </search_codebase>`)
 
 	return `\
     ${toolXMLDefinitions}
@@ -442,7 +455,14 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
 // ======================================================== chat (normal, gather, agent) ========================================================
 
 
-export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, semanticSnippets, gatheredContext, chatMode: mode, mcpTools, includeXMLToolDefinitions, gitBranch, gitStatus }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], gatheredContext?: string, chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, gitBranch: string, gitStatus: string }) => {
+export type ChatSystemMessageParts = {
+	/** Identity, context, tools — the stable background block */
+	identityBlock: string
+	/** Condensed rules + critical enforcement — the high-attention block injected last */
+	rulesBlock: string
+}
+
+export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, semanticSnippets, gatheredContext, chatMode: mode, mcpTools, includeXMLToolDefinitions, gitBranch, gitStatus }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], gatheredContext?: string, chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, gitBranch: string, gitStatus: string }): ChatSystemMessageParts => {
 	const header = (`You are an expert coding ${mode === 'agent' ? 'agent' : 'assistant'} whose job is \
 ${mode === 'agent' ? `to help the user develop, run, and make changes to their codebase.`
 			: mode === 'plan' ? `to plan and execute a coding task step-by-step.`
@@ -634,23 +654,37 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 
 
-	// return answer
-	const ansStrs: string[] = []
-	ansStrs.push(header)
-	ansStrs.push(sysInfo)
-	if (toolDefinitions) ansStrs.push(toolDefinitions)
-	ansStrs.push(fsInfo)
-	if (gatheredContextInfo) ansStrs.push(gatheredContextInfo)
-	if (semanticSnippets.length > 0) ansStrs.push(semanticInfo)
-	ansStrs.push(importantDetails)
+	// Build identity block: stable background context (read once, low-urgency)
+	const identityStrs: string[] = []
+	identityStrs.push(header)
+	identityStrs.push(sysInfo)
+	identityStrs.push(fsInfo)
+	if (gatheredContextInfo) identityStrs.push(gatheredContextInfo)
+	if (semanticSnippets.length > 0) identityStrs.push(semanticInfo)
+	if (toolDefinitions) identityStrs.push(toolDefinitions)
 
-	const fullSystemMsgStr = ansStrs
+	// Build rules block: condensed rules injected at high-recency position
+	const rulesStrs: string[] = []
+	rulesStrs.push(importantDetails)
+
+	const identityBlock = identityStrs
 		.join('\n\n\n')
 		.trim()
 		.replace('\t', '  ')
 
-	return fullSystemMsgStr
+	const rulesBlock = rulesStrs
+		.join('\n\n\n')
+		.trim()
+		.replace('\t', '  ')
 
+	return { identityBlock, rulesBlock }
+
+}
+
+/** Backwards-compatible helper: returns the full system message as a single string. */
+export const chat_systemMessageStr = (opts: Parameters<typeof chat_systemMessage>[0]): string => {
+	const { identityBlock, rulesBlock } = chat_systemMessage(opts)
+	return [identityBlock, rulesBlock].filter(Boolean).join('\n\n\n')
 }
 
 

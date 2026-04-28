@@ -1432,17 +1432,13 @@ Important:
 				const needsSearchCodebaseBeforePlanRetry =
 					chatMode === 'plan' &&
 					!latestAssistantPlanAlreadyExists &&
+					hasSuccessfulToolContext &&
 					!this._hasSuccessfulSearchCodebaseInThread(threadId) &&
 					!toolCall &&
 					!correctiveRetryInstruction
 
 				if (needsSearchCodebaseBeforePlanRetry) {
-					correctiveRetryInstruction = [
-						'Phase 1 (Discovery) is incomplete.',
-						'You MUST use `search_codebase` at least once before proposing a plan.',
-						'This ensures you find the system-of-record files and identify all relevant modules.',
-						'Perform repository discovery using `search_codebase` now.',
-					].join(' ')
+					correctiveRetryInstruction = 'Phase 1 incomplete. Perform repository discovery using the <search_codebase> tool now.'
 					console.warn(`[Void][AgentLoop][${threadId}] plan mode response arrived without search_codebase; scheduling discovery retry`);
 					shouldRetryLLM = true
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
@@ -1450,14 +1446,7 @@ Important:
 				}
 
 				if (needsInitialDiscoveryRetry) {
-					correctiveRetryInstruction = [
-						'Phase 1 (Discovery) is incomplete.',
-						'You are still missing repository grounding.',
-						'Do not write a plan yet.',
-						'First call a real repository discovery tool to inspect the codebase.',
-						'After tool results come back, continue discovery until you know the concrete files/modules involved.',
-						'Only then move to Phase 2 and write the first <plan>.',
-					].join(' ')
+					correctiveRetryInstruction = 'Phase 1 incomplete. Output an XML discovery tool call now. Example: <search_codebase><query>...</query></search_codebase>'
 					console.warn(`[Void][AgentLoop][${threadId}] plan mode response arrived before any successful discovery tool results; scheduling discovery retry`);
 					shouldRetryLLM = true
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
@@ -1631,6 +1620,10 @@ Important:
 						? await this._recordPlanTaskSummaryIfPresent(threadId, info.fullText)
 						: false
 
+					const currentMessages = this.state.allThreads[threadId]?.messages ?? []
+					const previousUserMsgForInfo = [...currentMessages].reverse().find(msg => msg.role === 'user');
+					const wasLastResultFormatError = previousUserMsgForInfo && typeof previousUserMsgForInfo.content === 'string' && previousUserMsgForInfo.content.includes('Error: Invalid LLM output format:');
+
 					if (chatMode === 'plan' && !toolCall && !hasTaskSummary && !hasWalkthrough && isPlanProposal) {
 						console.log(`[Void][AgentLoop][${threadId}] plan proposed; awaiting user review/proceed`);
 						isRunningWhenEnd = 'awaiting_user'
@@ -1638,7 +1631,21 @@ Important:
 					const pendingTasks = (chatMode === 'plan' || chatMode === 'agent') ? this._getPendingTasks(threadId) : []
 					const pendingSteps = pendingTasks.length
 
-					if (chatMode === 'plan' && hasTaskSummary && !recordedTaskSummary && !hasWalkthrough && autoContinueNudges < MAX_AUTO_CONTINUE_NUDGES) {
+					if (wasLastResultFormatError && autoContinueNudges < MAX_AUTO_CONTINUE_NUDGES) {
+						autoContinueNudges++
+						console.warn(`[Void][AgentLoop][${threadId}] model stopped instead of fixing format error; injecting syntax error nudge ${autoContinueNudges}/${MAX_AUTO_CONTINUE_NUDGES}`)
+
+						this._addMessageToThread(threadId, {
+							role: 'user',
+							content: `Your previous tool call failed due to a syntax format error. You must fix the XML syntax and retry. Example: <search_codebase><query>...</query></search_codebase>`,
+							state: { stagingSelections: [], isBeingEdited: false },
+							displayContent: `[Auto-continue: Syntax error nudge injected]`,
+						} as any)
+
+						shouldSendAnotherMessage = true
+						this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' })
+					}
+					else if (chatMode === 'plan' && hasTaskSummary && !recordedTaskSummary && !hasWalkthrough && autoContinueNudges < MAX_AUTO_CONTINUE_NUDGES) {
 						autoContinueNudges++
 						console.warn(`[Void][AgentLoop][${threadId}] model emitted task_summary without successful tool evidence; injecting corrective nudge ${autoContinueNudges}/${MAX_AUTO_CONTINUE_NUDGES}`)
 
@@ -1684,7 +1691,7 @@ Important:
 
 						this._addMessageToThread(threadId, {
 							role: 'user',
-							content: `Your <walkthrough> was not accepted because no state-changing tool call (edit, rewrite, command) successfully completed in the recent turn. You cannot be finished yet. Please execute real tool calls to implement the changes before providing a walkthrough.`,
+							content: `Walkthrough rejected: no state-changing tool call succeeded recently. Execute real tool calls to implement changes first.`,
 							state: { stagingSelections: [], isBeingEdited: false },
 							displayContent: `[Auto-continue: Walkthrough rejected]`,
 						} as any)
@@ -1699,7 +1706,7 @@ Important:
 						// Inject a corrective user message into the thread so the model sees it
 						this._addMessageToThread(threadId, {
 							role: 'user',
-							content: `The current task is NOT complete yet. You have not outputted a tool call or a <task_summary>. You MUST emit a tool call to continue executing the task.`,
+							content: `Task incomplete. You MUST emit an XML tool call now to continue.`,
 							state: { stagingSelections: [], isBeingEdited: false },
 							displayContent: `[Auto-continue: Nudge injected]`,
 						} as any)
@@ -1713,7 +1720,7 @@ Important:
 
 						this._addMessageToThread(threadId, {
 							role: 'user',
-							content: `You did not output a tool call or a <plan>. You must NEVER output prose without a tool call or <plan> block. Emit a tool call now to perform repository discovery.`,
+							content: `Emit an XML tool call now. Example: <search_codebase><query>...</query></search_codebase>`,
 							state: { stagingSelections: [], isBeingEdited: false },
 							displayContent: `[Auto-continue: Nudge injected]`,
 						} as any)
