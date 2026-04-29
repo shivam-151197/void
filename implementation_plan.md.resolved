@@ -1,57 +1,223 @@
-# Project Context Embeddings Integration
+# Void Agent Bug Diagnosis — UPDATED with Claw-Proxy Findings
 
-Integrate project context embeddings into the Void editor using the local proxy's `/v1/embeddings` endpoint. This will enable semantic search and enhance the existing "functional semantic graph" for better code context.
+## 🚨 Root Cause: claw-proxy v7/v8 Destroys Tool Calls in Both Directions
 
-## Proposed Changes
+**Your proxy is the #1 reason tool calling is broken.** Everything else is secondary.
 
-### Common Layer
-
-#### [MODIFY] [sendLLMMessageTypes.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageTypes.ts)
-- Add [EmbeddingsParams](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageTypes.ts#220-227) and `EmbeddingsResponse` types for IPC-based embedding requests.
-- Add [MainEmbeddingsParams](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageTypes.ts#236-237) and [EventEmbeddingsOnSuccessParams](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageTypes.ts#238-239) for IPC event handling.
-
-#### [MODIFY] [sendLLMMessageService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageService.ts)
-- Add [getEmbeddings](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts#984-985) method to [ILLMMessageService](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/sendLLMMessageService.ts#21-29) to bridge the frontend and backend for embedding requests.
+You're using GPT 5.4 Pro (v8) and Codex 5.3 (v7) via Azure Responses API through `claw-proxy`. The proxy converts between Azure's Responses API format and OpenAI Chat Completions format. But **it breaks tool calls in 3 critical ways:**
 
 ---
 
-### Electron-Main Layer
+### Proxy Bug A: Tool Call History Flattened to Plain Text (REQUEST direction)
 
-#### [MODIFY] [sendLLMMessageChannel.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/sendLLMMessageChannel.ts)
-- Add [getEmbeddings](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts#984-985) command to the IPC channel to handle requests from the browser.
-- Emit `onSuccess_embeddings` and `onError_embeddings` events back to the browser.
+**File:** [server.js v7 L1342-1353](file:///home/shivam/Desktop/claw-proxy/server.js#L1342-L1353), [server.js v8 L1538-1549](file:///home/shivam/Desktop/claw-proxy/server.js#L1538-L1549)
 
-#### [MODIFY] [sendLLMMessage.impl.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts)
-- Implement [_sendOpenAICompatibleEmbeddings](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.impl.ts#429-447) to call the local proxy's `/v1/embeddings` endpoint.
-- Register this implementation in `sendLLMMessageToProviderImplementation`.
+```js
+// v7 & v8 do this IDENTICAL conversion:
+const convertedMessages = messages.map(msg => {
+  if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+    const toolCallsText = msg.tool_calls.map(tc =>
+      `Called function ${tc.function.name} with arguments: ${tc.function.arguments}`
+    ).join('\n');
+    return { role: msg.role, content: msg.content ? `${msg.content}\n\n${toolCallsText}` : toolCallsText };
+  }
+  if (msg.role === 'tool') {
+    return { role: 'user', content: `Tool result from ${msg.name || 'function'}:\n${msg.content}` };
+  }
+  return { role: msg.role, content: ... };
+});
+```
+
+**What this does:**
+1. **Destroys `tool_calls` on assistant messages** — converts `{"tool_calls": [{"function": {"name": "read_file", ...}}]}` into plain English text `"Called function read_file with arguments: ..."`. The model sees this as narrative, **not** as evidence of its own structured tool calls.
+2. **Converts `role: 'tool'` to `role: 'user'`** — the model sees tool results as if the user typed them. This completely breaks the _function calling continuation protocol_ that GPT models rely on.
+
+**Impact:** The model has no memory of having made structured tool calls. From its perspective, it never called any tools — it just sees plain text summaries. So it doesn't learn the tool-calling pattern and starts emitting raw JSON or XML in its text output instead.
 
 ---
 
-### Browser Layer
+### Proxy Bug B: Azure Responses API `input` vs OpenAI `messages` Format Mismatch
 
-#### [NEW] [voidEmbeddingProvider.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/voidEmbeddingProvider.ts)
-- Implement [IAiEmbeddingVectorProvider](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.ts#25-28) using the `ILLMMessageService.getEmbeddings` method.
-- Register the provider with VS Code's [IAiEmbeddingVectorService](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.ts#16-24).
+**File:** [server.js v7 L1355-1360](file:///home/shivam/Desktop/claw-proxy/server.js#L1355-L1360), [server.js v8 L1551-1556](file:///home/shivam/Desktop/claw-proxy/server.js#L1551-L1556)
 
-#### [MODIFY] [contextGatheringService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/contextGatheringService.ts)
-- Integrate semantic retrieval using the embedding provider to supplement the existing graph-based context.
+```js
+const requestPayload = {
+  input: convertedMessages,  // ← Uses 'input' for Azure Responses API
+  ...
+};
+```
+
+Azure Responses API expects a different message schema than OpenAI Chat Completions. The proxy sends `input` instead of `messages`, which is correct for Azure Responses API. **But** the Responses API has its own native way of handling function calls via the `output` format — the proxy should be using Azure's native `function_call` items in the `input` array, not flattening them to text.
+
+---
+
+### Proxy Bug C: Streaming Response Correctly Translates SOME Tool Events, But Misses Edge Cases
+
+**File:** [server.js v8 L1629-1647](file:///home/shivam/Desktop/claw-proxy/server.js#L1629-L1647)
+
+The proxy **does** handle streaming tool calls in the response direction (translating `response.output_item.added` with `type: 'function_call'` into OpenAI's `delta.tool_calls` format). This part is mostly correct. **But:**
+
+1. The `role: 'assistant'` is only set on the first text chunk (L1627 `delta: { role: 'assistant', content }`), not on tool call chunks. OpenAI expects `role: 'assistant'` on the chunk that initiates tool calls too.
+2. If the model returns ONLY a tool call (no text), the proxy never sends a chunk with `role: 'assistant'` at all — the client may not recognize it as an assistant message.
+
+---
+
+## Answer to Your System Prompt Question
+
+> "If we remove system prompt from next calls from same session will it not lose its persona?"
+
+**Short answer: Yes, it would lose persona — but we're NOT removing it entirely.** Here's the nuance:
+
+GPT 5.4 Pro / Codex 5.3 via Azure are **stateless** — every API call is independent. They don't remember the system prompt from the previous call. **You MUST send the system prompt every time.**
+
+However, the optimization isn't about removing the system prompt. It's about:
+
+1. **Caching the system prompt string** within a single [_runChatAgent](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/chatThreadService.ts#1230-1776) loop iteration (don't regenerate the directory tree, git status, semantic snippets on every retry within the same user turn — the workspace hasn't changed in 2 seconds)
+2. **Reducing the prompt SIZE** by removing redundant rules (currently ~3000+ tokens of rules, many stated 2-3 times)
+3. The system prompt stays — it's just not RE-COMPUTED every iteration
+
+---
+
+## Updated Bug Priority (with Proxy)
+
+| Priority | Bug | Impact | Location |
+|----------|-----|--------|----------|
+| 🔴 **P0** | **Proxy Bug A**: Tool calls flattened to text | Agent can't learn tool calling | [claw-proxy/server.js](file:///home/shivam/Desktop/claw-proxy/server.js) v7/v8 |
+| 🔴 **P0** | **Proxy Bug B**: Tool results sent as `role: 'user'` | Breaks function calling protocol | [claw-proxy/server.js](file:///home/shivam/Desktop/claw-proxy/server.js) v7/v8 |
+| 🟡 P1 | Proxy Bug C: Missing `role: 'assistant'` on tool-only chunks | Tool-only responses may be dropped | [claw-proxy/server.js](file:///home/shivam/Desktop/claw-proxy/server.js) v7/v8 |
+| 🟡 P1 | Void Bug 1+2: XML tags in prompts + nudge messages | Model emits wrong format | [prompts.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/prompt/prompts.ts), [chatThreadService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/chatThreadService.ts) |
+| 🟡 P1 | Void Bug 4: Unbounded corrective retries | Infinite loops | [chatThreadService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/chatThreadService.ts) |
+| 🟢 P2 | Void Bug 3: System prompt too large | Token waste, low adherence | [prompts.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/prompt/prompts.ts) |
+| 🟢 P2 | Void Bug 5: System prompt recomputed every iteration | Token explosion | [chatThreadService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/chatThreadService.ts) |
+| 🟢 P2 | Void Bug 6-8: Various context/nudge issues | State pollution | [chatThreadService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/chatThreadService.ts) |
+
+---
+
+## Proposed Fix for Proxy (P0)
+
+### Fix the `convertedMessages` in v7/v8 to preserve tool call structure
+
+The Azure Responses API supports function calls natively. Instead of flattening tool calls to text, convert them to Azure's format:
+
+```diff
+- // BROKEN: flattens tool calls to plain text
+- const convertedMessages = messages.map(msg => {
+-   if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+-     const toolCallsText = msg.tool_calls.map(tc =>
+-       `Called function ${tc.function.name} with arguments: ${tc.function.arguments}`
+-     ).join('\n');
+-     return { role: msg.role, content: msg.content ? ... };
+-   }
+-   if (msg.role === 'tool') {
+-     return { role: 'user', content: ... };
+-   }
+- });
+
++ // FIXED: preserve tool calls in Azure Responses API format
++ const convertedInput = [];
++ for (const msg of messages) {
++   if (msg.role === 'system') {
++     // System messages go in the 'instructions' field or as system items
++     convertedInput.push({ role: 'system', content: msg.content });
++   } else if (msg.role === 'assistant' && msg.tool_calls) {
++     // Assistant text (if any)
++     if (msg.content) {
++       convertedInput.push({ type: 'message', role: 'assistant',
++         content: [{ type: 'output_text', text: msg.content }] });
++     }
++     // Each tool call becomes a function_call item
++     for (const tc of msg.tool_calls) {
++       convertedInput.push({
++         type: 'function_call',
++         call_id: tc.id,
++         name: tc.function.name,
++         arguments: tc.function.arguments
++       });
++     }
++   } else if (msg.role === 'tool') {
++     // Tool results become function_call_output items
++     convertedInput.push({
++       type: 'function_call_output',
++       call_id: msg.tool_call_id,
++       output: msg.content
++     });
++   } else {
++     convertedInput.push({
++       role: msg.role,
++       content: typeof msg.content === 'string'
++         ? msg.content
++         : JSON.stringify(msg.content || '')
++     });
++   }
++ }
+```
+
+### Fix for streaming direction (Proxy Bug C)
+
+Ensure the first tool call chunk includes `role: 'assistant'`:
+
+```diff
+  if (ev.type === 'response.output_item.added' && ev.item?.type === 'function_call') {
+    const callId = ev.item.id || `call_${Date.now()}_${currentToolCallIndex}`;
+    const funcName = ev.item.name || '';
+    toolCallsBuffer[callId] = { ... };
+    res.write(`data: ${JSON.stringify({
+      ...,
+      choices: [{ index: 0, delta: {
++       role: 'assistant',
+        tool_calls: [{ index: currentToolCallIndex, id: callId, ... }]
+      }, finish_reason: null }]
+    })}\n\n`);
+```
+
+---
+
+## Void-Side Fixes (P1, after proxy is fixed)
+
+### 1. Strip XML from nudge messages
+In [chatThreadService.ts](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/chatThreadService.ts), replace all corrective nudge strings that contain `<tool_name>` syntax:
+
+```diff
+- correctiveRetryInstruction = 'Phase 1 incomplete. Perform repository discovery using the <search_codebase> tool now.'
++ correctiveRetryInstruction = 'Phase 1 incomplete. Use the search_codebase tool now to perform repository discovery.'
+```
+
+### 2. Cap total corrective retries
+Add a unified counter in [_runChatAgent](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/browser/chatThreadService.ts#1230-1776):
+
+```diff
++ let totalCorrectiveRetries = 0;
++ const MAX_TOTAL_RETRIES = 4;
+
+  // Before each correctiveRetryInstruction retry:
++ totalCorrectiveRetries++;
++ if (totalCorrectiveRetries >= MAX_TOTAL_RETRIES) {
++   console.error(`[Void] Max corrective retries reached, stopping loop`);
++   break;
++ }
+```
+
+### 3. Cache system prompt within a session turn
+Move `prepareLLMChatMessages` system message generation outside the while loop:
+
+```diff
++ // Cache system message for the duration of this agent turn
++ const cachedSystemMessage = await this._convertToLLMMessagesService
++   .prepareCachedSystemMessage({ chatMode, modelSelection });
++
+  while (shouldSendAnotherMessage) {
+-   const { messages, separateSystemMessage } = await this._convertToLLMMessagesService
+-     .prepareLLMChatMessages({ chatMessages, modelSelection, chatMode });
++   const { messages, separateSystemMessage } = this._convertToLLMMessagesService
++     .prepareLLMChatMessagesWithCachedSystem({ chatMessages, modelSelection, chatMode, cachedSystemMessage });
+```
+
+---
 
 ## Verification Plan
 
-### Automated Tests
-- Verify embedding retrieval via a script that calls `ILLMMessageService.getEmbeddings`.
-- Test IPC communication by triggering an embedding request from the developer console.
-
-### Manual Verification
-- Check that the local proxy logs record requests to `/v1/embeddings` when the chat mode is set to "gather".
-- Verify that semantic context (Snippets) are included in the LLM prompt.
-
-## Observability & Verification
-
-To ensure the system is working, I will add prominent logging:
-- **Embedding Heartbeat**: Log "Void: Creating embedding for [text...]" in `VoidEmbeddingProvider.ts`.
-- **Semantic Search Heartbeat**: Log "Void: Performing semantic search for: [query]" and "Void: Found [N] snippets" in `ContextGatheringService.ts`.
-
-These logs will be visible in:
-1. The **terminal** where you run [./scripts/code.sh](file:///home/shivam/Desktop/Shivam/void/scripts/code.sh).
-2. The **Developer Tools Console** (Help -> Toggle Developer Tools).
+1. **Fix proxy first** → restart claw-proxy → test with a simple tool call task
+2. Confirm in proxy logs that `function_call` items appear in the Azure request payload (not flattened text)
+3. Confirm in proxy logs that the streaming response correctly translates `function_call` events back to OpenAI `tool_calls` delta format
+4. In Void, verify the agent loop completes a discovery → plan → execute flow without nudge loops
+5. Check [void_agent_session.json](file:///home/shivam/Desktop/Shivam/void/void_agent_session.json) — assistant messages should show [toolCall](file:///home/shivam/Desktop/Shivam/void/src/vs/workbench/contrib/void/common/prompt/prompts.ts#394-416) field populated (not `undefined`)

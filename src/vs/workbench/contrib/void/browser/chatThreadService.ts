@@ -1255,6 +1255,10 @@ Important:
 		let correctiveRetryInstruction: string | null = null
 		let autoContinueNudges = 0
 		const MAX_AUTO_CONTINUE_NUDGES = 3 // safety cap to prevent infinite loops
+		let totalCorrectiveRetries = 0
+		const MAX_TOTAL_CORRECTIVE_RETRIES = 5 // safety cap for overall corrective retries
+
+		let cachedContext: any = undefined;
 
 		// before enter loop, call tool
 		if (callThisToolFirst) {
@@ -1280,11 +1284,13 @@ Important:
 			const chatMessages = this.state.allThreads[threadId]?.messages ?? []
 			const prepareStart = Date.now();
 			console.log(`[Void][AgentLoop][${threadId}] preparing chat messages (iteration=${nMessagesSent}, mode=${chatMode}, history=${chatMessages.length})`);
-			const { messages, separateSystemMessage } = await this._convertToLLMMessagesService.prepareLLMChatMessages({
+			const { messages, separateSystemMessage, cachedContext: newCachedContext } = await this._convertToLLMMessagesService.prepareLLMChatMessages({
 				chatMessages,
 				modelSelection,
-				chatMode
+				chatMode,
+				cachedContext
 			})
+			cachedContext = newCachedContext;
 			console.log(`[Void][AgentLoop][${threadId}] prepared chat messages in ${Date.now() - prepareStart}ms (iteration=${nMessagesSent}, outbound=${messages.length}, separateSystem=${!!separateSystemMessage})`);
 
 			if (interruptedWhenIdle) {
@@ -1316,7 +1322,14 @@ Important:
 					]
 					: messages
 				if (correctiveRetryInstruction) {
-					console.warn(`[Void][AgentLoop][${threadId}] retrying iteration=${nMessagesSent} with corrective plan instruction`);
+					totalCorrectiveRetries++;
+					if (totalCorrectiveRetries >= MAX_TOTAL_CORRECTIVE_RETRIES) {
+						console.error(`[Void][AgentLoop][${threadId}] Max corrective retries reached (${MAX_TOTAL_CORRECTIVE_RETRIES}), stopping loop.`);
+						shouldRetryLLM = false;
+						shouldSendAnotherMessage = false;
+						break;
+					}
+					console.warn(`[Void][AgentLoop][${threadId}] retrying iteration=${nMessagesSent} with corrective plan instruction (${totalCorrectiveRetries}/${MAX_TOTAL_CORRECTIVE_RETRIES})`);
 				}
 
 				this._appendDebugLog(threadId, {
@@ -1406,7 +1419,59 @@ Important:
 				}
 
 				// llm res success
-				const { toolCall, info } = llmRes
+				let { toolCall, info } = llmRes
+
+				// --- Custom Fix: Parse RAW JSON-RPC output from stubborn models natively! ---
+				if (!toolCall && info.fullText && info.fullText.trim().startsWith('{') && info.fullText.trim().endsWith('}')) {
+					try {
+						const candidateObj = JSON.parse(info.fullText.trim());
+
+						// Look for the method name in a variety of common keys
+						let methodName = candidateObj.tool || candidateObj.command || candidateObj.method || candidateObj.name || candidateObj.function?.name || candidateObj.plugin;
+
+						// Special case: if 'id' is a valid tool name and methodName is missing, treat 'id' as the name
+						if (!methodName && typeof candidateObj.id === 'string' && isABuiltinToolName(candidateObj.id)) {
+							methodName = candidateObj.id;
+						}
+
+						const paramsObj = candidateObj.params || candidateObj.arguments || candidateObj.function?.arguments || candidateObj.args || candidateObj.command_params;
+
+						const paramsObjParsed = typeof paramsObj === 'string' ? JSON.parse(paramsObj) : (paramsObj || {});
+
+						// Determine a persistent ID
+						let uuidForJsonTool = candidateObj.call_id || generateUuid();
+						// Only use candidateObj.id as uuid if it wasn't already consumed as the methodName
+						if (candidateObj.id && candidateObj.id !== methodName) {
+							uuidForJsonTool = candidateObj.id;
+						}
+
+						if (methodName && typeof methodName === 'string') {
+							const sanitizedParams: Record<string, string> = {};
+							for (const key in paramsObjParsed) {
+								if (typeof paramsObjParsed[key] === 'object') {
+									sanitizedParams[key] = JSON.stringify(paramsObjParsed[key]);
+								} else {
+									sanitizedParams[key] = String(paramsObjParsed[key]);
+								}
+							}
+
+							console.warn(`[Void][AgentLoop][${threadId}] Discovered JSON tool string inside raw text! Re-hydrating tool: ${methodName}`);
+							toolCall = {
+								name: methodName as any,
+								rawParams: sanitizedParams as any,
+								isDone: true,
+								doneParams: Object.keys(sanitizedParams) as any,
+								id: uuidForJsonTool
+							};
+
+							info.fullText = ''; // Hide JSON from the stream text
+						}
+					} catch (e) {
+						console.error(`[Void][AgentLoop] JSON extraction failed:`, e);
+					}
+				}
+				// ----------------------------------------------------------------------------
+
 				console.log(`[Void][AgentLoop][${threadId}] LLM iteration=${nMessagesSent} completed with toolCall=${toolCall?.name ?? 'none'} textLength=${info.fullText.length}`);
 
 				const latestAssistantPlanAlreadyExists = chatMessages.some(m => m.role === 'assistant' && !!extractTagBlock(m.displayContent, 'plan'))
@@ -1449,7 +1514,7 @@ Important:
 					!correctiveRetryInstruction
 
 				if (needsSearchCodebaseBeforePlanRetry) {
-					correctiveRetryInstruction = 'Phase 1 incomplete. Perform repository discovery using the <search_codebase> tool now.'
+					correctiveRetryInstruction = 'Phase 1 incomplete. Use the search_codebase tool now to perform repository discovery.'
 					console.warn(`[Void][AgentLoop][${threadId}] plan mode response arrived without search_codebase; scheduling discovery retry`);
 					shouldRetryLLM = true
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })

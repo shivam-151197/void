@@ -521,8 +521,10 @@ ${gatheredContext}
 	if (mode === 'agent' || mode === 'gather' || mode === 'plan') {
 		details.push(`Only call tools if they help you accomplish the user's goal. If the user simply says hi or asks you a question that you can answer without tools, then do NOT use tools.`)
 		details.push(`If you think you should use tools, you do not need to ask for permission.`)
-		details.push('Only use ONE tool call per response. Place it at the end of the response.')
-		details.push(`NEVER say something like "I'm going to use \`tool_name\`". Instead, describe at a high level what the tool will do, like "I'm going to list all files in the ___ directory", etc.`)
+		if (includeXMLToolDefinitions) {
+			details.push('Only use ONE tool call per response. Place it at the end of the response.')
+			details.push(`NEVER say something like "I'm going to use \`tool_name\`". Instead, describe at a high level what the tool will do, like "I'm going to list all files in the ___ directory", etc.`)
+		}
 		details.push(`Many tools only work if the user has a workspace open.`)
 		details.push(`For repository-change requests (refactor, replace API usage, migration, bug fix, feature edits), your FIRST response must include a real tool call that gathers code context. Do not stop at a narrative like "I'll inspect the repository" without calling a tool.`)
 		details.push(`Use tools like \`search_codebase\` and \`semantic_search\` to find relevant code when you are unsure where to look.`)
@@ -530,7 +532,9 @@ ${gatheredContext}
 		details.push(`UNNECESSARY EXPLORATION: Once \`search_codebase\` returns highly relevant files (.js, .ts, etc.), do NOT call \`get_dir_tree\` for general exploration. Instead, use \`read_file\` on the returned candidates or STOP and answer. Loops of \`get_dir_tree\` calls are prohibited.`)
 		details.push(`GROUNDING: When using \`search_codebase\`, you may ONLY mention files and structures that were actually returned. Do NOT invent service names, directories, or languages (e.g. do not assume Go in a Node environment).`)
 		details.push(`STOP CRITERIA: If you have found high-relevance matches in \`search_codebase\`, you likely have sufficient information. Stop calling tools and provide your final answer.`)
-		details.push(`If a tool call is required, end the response with that tool call and no additional trailing text.`)
+		if (includeXMLToolDefinitions) {
+			details.push(`If a tool call is required, end the response with that tool call and no additional trailing text.`)
+		}
 		details.push(`Do not end your turn until you have either: (a) produced the mode-required structured output (like a <plan>), or (b) emitted a real tool call that advances the user's task.`)
 		details.push(`Never stop after generic prose such as "I'll inspect the repository", "Let's start by exploring", or "I can help with that". Those are invalid incomplete responses.`)
 	}
@@ -654,7 +658,7 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 		details.push(`TOOL CALL FORMATTING:
 - The user's system supports NATIVE function calling. You must exclusively use the provided JSON function tools natively.
 - NEVER output XML-based tool calls (like <search_codebase>...</search_codebase>) in your raw text response.
-- NEVER output standalone JSON tool calls as raw text. Only use the native tool calling schema provided by the API.`)
+- NEVER output standalone JSON tool calls as raw text. Only use the native tool calling schema provided by the API. If for any reason the native tool caller is failing or unavailable, you MUST output a single raw JSON object using the keys "tool" and "params" (e.g. {"tool": "read_file", "params": {"uri": "..."}}) then STOP.`)
 	}
 
 	details.push(`TOOL CALL COMPLETION RULE:

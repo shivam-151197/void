@@ -456,6 +456,9 @@ const extensiveModelOptionsFallback: VoidStaticProviderInfo['modelOptionsFallbac
 
 	if (lower.includes('quasar') || lower.includes('quaser')) return toFallback(openSourceModelOptions_assumingOAICompat, 'quasar')
 
+	if (lower.includes('gpt') && (lower.includes('5.3') || lower.includes('5-3') || lower.includes('5.4') || lower.includes('5-4'))) return toFallback(openAIModelOptions, 'gpt-4.1')
+	if (lower.includes('gpt') && lower.includes('5')) return toFallback(openAIModelOptions, 'gpt-4.1')
+
 	if (lower.includes('gpt') && lower.includes('mini') && (lower.includes('4.1') || lower.includes('4-1'))) return toFallback(openAIModelOptions, 'gpt-4.1-mini')
 	if (lower.includes('gpt') && lower.includes('nano') && (lower.includes('4.1') || lower.includes('4-1'))) return toFallback(openAIModelOptions, 'gpt-4.1-nano')
 	if (lower.includes('gpt') && (lower.includes('4.1') || lower.includes('4-1'))) return toFallback(openAIModelOptions, 'gpt-4.1')
@@ -1121,7 +1124,20 @@ const microsoftAzureModelOptions = {
 } as const satisfies Record<string, VoidStaticModelInfo>
 const microsoftAzureSettings: VoidStaticProviderInfo = {
 	modelOptions: microsoftAzureModelOptions,
-	modelOptionsFallback: (modelName) => { return null },
+	modelOptionsFallback: (modelName) => {
+		const res = extensiveModelOptionsFallback(modelName)
+		if (res) {
+			res.specialToolFormat = 'openai-style'
+			return res
+		}
+		// Provide a default that explicitly tells Void to use openai-style tools
+		return {
+			modelName,
+			recognizedModelName: modelName,
+			...defaultModelOptions,
+			specialToolFormat: 'openai-style'
+		}
+	},
 	providerReasoningIOSettings: {
 		input: { includeInPayload: openAICompatIncludeInPayloadReasoning },
 	},
@@ -1250,7 +1266,17 @@ const ollamaSettings: VoidStaticProviderInfo = {
 }
 
 const openaiCompatible: VoidStaticProviderInfo = {
-	modelOptionsFallback: (modelName) => extensiveModelOptionsFallback(modelName),
+	modelOptionsFallback: (modelName) => {
+		const res = extensiveModelOptionsFallback(modelName)
+		if (res) return res
+		// Safety net: OpenAI-compatible endpoints should always use native tools
+		return {
+			modelName,
+			recognizedModelName: modelName,
+			...defaultModelOptions,
+			specialToolFormat: 'openai-style'
+		}
+	},
 	modelOptions: {},
 	providerReasoningIOSettings: {
 		// reasoning: we have no idea what endpoint they used, so we can't consistently parse out reasoning

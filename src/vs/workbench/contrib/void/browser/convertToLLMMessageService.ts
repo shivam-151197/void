@@ -533,7 +533,7 @@ const prepareMessages = (params: {
 export interface IConvertToLLMMessageService {
 	readonly _serviceBrand: undefined;
 	prepareLLMSimpleMessages: (opts: { simpleMessages: SimpleLLMMessage[], systemMessage: string, modelSelection: ModelSelection | null, featureName: FeatureName }) => { messages: LLMChatMessage[], separateSystemMessage: string | undefined }
-	prepareLLMChatMessages: (opts: { chatMessages: ChatMessage[], chatMode: ChatMode, modelSelection: ModelSelection | null }) => Promise<{ messages: LLMChatMessage[], separateSystemMessage: string | undefined }>
+	prepareLLMChatMessages: (opts: { chatMessages: ChatMessage[], chatMode: ChatMode, modelSelection: ModelSelection | null, cachedContext?: { semanticSnippets: string[], gatheredContext: string, systemMessageParts: { identityBlock: string, rulesBlock: string } } }) => Promise<{ messages: LLMChatMessage[], separateSystemMessage: string | undefined, cachedContext?: { semanticSnippets: string[], gatheredContext: string, systemMessageParts: { identityBlock: string, rulesBlock: string } } }>
 	prepareFIMMessage(opts: { messages: LLMFIMMessage, }): { prefix: string, suffix: string, stopTokens: string[] }
 }
 
@@ -718,7 +718,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		})
 		return { messages, separateSystemMessage };
 	}
-	prepareLLMChatMessages: IConvertToLLMMessageService['prepareLLMChatMessages'] = async ({ chatMessages, chatMode, modelSelection }) => {
+	prepareLLMChatMessages: IConvertToLLMMessageService['prepareLLMChatMessages'] = async ({ chatMessages, chatMode, modelSelection, cachedContext }) => {
 		if (modelSelection === null) return { messages: [], separateSystemMessage: undefined }
 
 		const { overridesOfModel } = this.voidSettingsService.state
@@ -735,22 +735,29 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const lastUserMessage = [...chatMessages].reverse().find(m => m.role === 'user');
 		let semanticSnippets: string[] = [];
 		let gatheredContext = '';
-		const semanticStart = Date.now();
-		if (lastUserMessage && typeof lastUserMessage.content === 'string') {
-			console.log(`[Void][prepareLLMChatMessages] starting semantic snippets lookup (mode=${chatMode}) for message length=${lastUserMessage.content.length}`);
-			semanticSnippets = await this.contextGatheringService.getSemanticSnippets(lastUserMessage.content);
-			if (chatMode === 'agent' || chatMode === 'gather' || chatMode === 'plan') {
-				const contextStart = Date.now();
-				const context = await this.contextGatheringService.gatherContext(lastUserMessage.content);
-				gatheredContext = formatGatheredContextForPrompt(context);
-				const contextSummary = summarizeGatheredContextForLog(context);
-				console.log(`[Void][prepareLLMChatMessages] deterministic context ready in ${Date.now() - contextStart}ms (files=${context.relevantFiles.length}, promptChars=${gatheredContext.length}, top=${contextSummary}, mode=${chatMode})`);
+
+		if (cachedContext) {
+			semanticSnippets = cachedContext.semanticSnippets;
+			gatheredContext = cachedContext.gatheredContext;
+			console.log(`[Void][prepareLLMChatMessages] using cached context (snippets=${semanticSnippets.length}, chars=${gatheredContext.length})`);
+		} else {
+			const semanticStart = Date.now();
+			if (lastUserMessage && typeof lastUserMessage.content === 'string') {
+				console.log(`[Void][prepareLLMChatMessages] starting semantic snippets lookup (mode=${chatMode}) for message length=${lastUserMessage.content.length}`);
+				semanticSnippets = await this.contextGatheringService.getSemanticSnippets(lastUserMessage.content);
+				if (chatMode === 'agent' || chatMode === 'gather' || chatMode === 'plan') {
+					const contextStart = Date.now();
+					const context = await this.contextGatheringService.gatherContext(lastUserMessage.content);
+					gatheredContext = formatGatheredContextForPrompt(context);
+					const contextSummary = summarizeGatheredContextForLog(context);
+					console.log(`[Void][prepareLLMChatMessages] deterministic context ready in ${Date.now() - contextStart}ms (files=${context.relevantFiles.length}, promptChars=${gatheredContext.length}, top=${contextSummary}, mode=${chatMode})`);
+				}
 			}
+			console.log(`[Void][prepareLLMChatMessages] semantic snippets ready in ${Date.now() - semanticStart}ms (count=${semanticSnippets.length}, mode=${chatMode})`);
 		}
-		console.log(`[Void][prepareLLMChatMessages] semantic snippets ready in ${Date.now() - semanticStart}ms (count=${semanticSnippets.length}, mode=${chatMode})`);
 
 		const systemMessageStart = Date.now();
-		const systemMessageParts = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat, semanticSnippets, gatheredContext)
+		const systemMessageParts = cachedContext?.systemMessageParts ?? await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat, semanticSnippets, gatheredContext)
 		console.log(`[Void][prepareLLMChatMessages] system message built in ${Date.now() - systemMessageStart}ms (mode=${chatMode}, semanticSnippets=${semanticSnippets.length})`);
 		const planJournalContext = chatMode === 'plan' ? this._buildPlanTaskJournalContext(chatMessages) : ''
 
@@ -795,7 +802,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			providerName,
 		})
 		console.log(`[Void][prepareLLMChatMessages] prepared ${messages.length} LLM messages (mode=${chatMode}, separateSystemMessage=${!!separateSystemMessage})`);
-		return { messages, separateSystemMessage };
+		return { messages, separateSystemMessage, cachedContext: { semanticSnippets, gatheredContext, systemMessageParts } };
 	}
 
 
