@@ -11,13 +11,14 @@ import { reParsedToolXMLString, chat_systemMessage, ChatSystemMessageParts } fro
 import { AnthropicLLMChatMessage, AnthropicReasoning, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, OpenAILLMChatMessage, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { IVoidSettingsService } from '../common/voidSettingsService.js';
 import { ChatMode, FeatureName, ModelSelection, ProviderName } from '../common/voidSettingsTypes.js';
-import { IDirectoryStrService } from '../common/directoryStrService.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
 import { ITerminalToolService } from './terminalToolService.js';
 import { IVoidModelService } from '../common/voidModelService.js';
 import { IContextGatheringService } from './contextGatheringService.js';
 import { URI } from '../../../../base/common/uri.js';
 import { EndOfLinePreference } from '../../../../editor/common/model.js';
 import { ToolName } from '../common/toolsServiceTypes.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 import { IMCPService } from '../common/mcpService.js';
 import { formatGatheredContextForPrompt, summarizeGatheredContextForLog } from '../common/contextGathering/contextGatherer.js';
 
@@ -533,7 +534,7 @@ const prepareMessages = (params: {
 export interface IConvertToLLMMessageService {
 	readonly _serviceBrand: undefined;
 	prepareLLMSimpleMessages: (opts: { simpleMessages: SimpleLLMMessage[], systemMessage: string, modelSelection: ModelSelection | null, featureName: FeatureName }) => { messages: LLMChatMessage[], separateSystemMessage: string | undefined }
-	prepareLLMChatMessages: (opts: { chatMessages: ChatMessage[], chatMode: ChatMode, modelSelection: ModelSelection | null, cachedContext?: { semanticSnippets: string[], gatheredContext: string, systemMessageParts: { identityBlock: string, rulesBlock: string } } }) => Promise<{ messages: LLMChatMessage[], separateSystemMessage: string | undefined, cachedContext?: { semanticSnippets: string[], gatheredContext: string, systemMessageParts: { identityBlock: string, rulesBlock: string } } }>
+	prepareLLMChatMessages: (opts: { chatMessages: ChatMessage[], chatMode: ChatMode, modelSelection: ModelSelection | null, cachedContext?: { semanticSnippets: string[], gatheredContext: string, systemMessageParts: { identityBlock: string, rulesBlock: string } }, threadId?: string, summarizedContext?: { text: string, summarizedUntilMessageIdx: number } }) => Promise<{ messages: LLMChatMessage[], separateSystemMessage: string | undefined, cachedContext?: { semanticSnippets: string[], gatheredContext: string, systemMessageParts: { identityBlock: string, rulesBlock: string } } }>
 	prepareFIMMessage(opts: { messages: LLMFIMMessage, }): { prefix: string, suffix: string, stopTokens: string[] }
 }
 
@@ -547,10 +548,11 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		@IModelService private readonly modelService: IModelService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IEditorService private readonly editorService: IEditorService,
-		@IDirectoryStrService private readonly directoryStrService: IDirectoryStrService,
+
 		@ITerminalToolService private readonly terminalToolService: ITerminalToolService,
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
 		@IVoidModelService private readonly voidModelService: IVoidModelService,
+		@IFileService private readonly fileService: IFileService,
 		@IMCPService private readonly mcpService: IMCPService,
 		@IContextGatheringService private readonly contextGatheringService: IContextGatheringService,
 	) {
@@ -606,11 +608,23 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const openedURIs = this.modelService.getModels().filter(m => m.isAttachedToEditor()).map(m => m.uri.fsPath) || [];
 		const activeURI = this.editorService.activeEditor?.resource?.fsPath;
 
-		const directoryStr = await this.directoryStrService.getAllDirectoriesStr({
-			cutOffMessage: chatMode === 'agent' || chatMode === 'gather' || chatMode === 'plan' ?
-				`...Directories string cut off, use tools to read more...`
-				: `...Directories string cut off, ask user for more if necessary...`
-		})
+		let repoBrainContent = '';
+		if (workspaceFolders.length > 0) {
+			const brainUri = URI.joinPath(URI.file(workspaceFolders[0]), '.void', 'repo_brain.md');
+			try {
+				const fileContent = await this.fileService.readFile(brainUri);
+				repoBrainContent = fileContent.value.toString();
+			} catch (e) {
+				repoBrainContent = '# Repository Memory (Global Scratchpad)\n\nNo repository memory available yet. Please explore the repository using tools (like `get_dir_tree`) and document key findings here in the future!';
+				try {
+					const brainDir = URI.joinPath(URI.file(workspaceFolders[0]), '.void');
+					try { await this.fileService.createFolder(brainDir); } catch (err) { }
+					await this.fileService.writeFile(brainUri, VSBuffer.fromString(repoBrainContent));
+				} catch (err) {
+					console.error('Failed to initialize repo brain', err);
+				}
+			}
+		}
 
 		const includeXMLToolDefinitions = !specialToolFormat
 
@@ -621,7 +635,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		}
 
 		const persistentTerminalIDs = this.terminalToolService.listPersistentTerminalIds()
-		const systemMessageParts: ChatSystemMessageParts = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, semanticSnippets, gatheredContext, chatMode, mcpTools, includeXMLToolDefinitions, gitBranch: gitInfo.branch, gitStatus: gitInfo.status })
+		const systemMessageParts: ChatSystemMessageParts = chat_systemMessage({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, repoBrainContent, semanticSnippets, gatheredContext, chatMode, mcpTools, includeXMLToolDefinitions, gitBranch: gitInfo.branch, gitStatus: gitInfo.status })
 		return systemMessageParts
 	}
 
@@ -630,8 +644,19 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 	// --- LLM Chat messages ---
 
-	private _chatMessagesToSimpleMessages(chatMessages: ChatMessage[]): SimpleLLMMessage[] {
+	private _chatMessagesToSimpleMessages(chatMessages: ChatMessage[], threadId?: string, summarizedContext?: { text: string, summarizedUntilMessageIdx: number }): SimpleLLMMessage[] {
 		const simpleLLMMessages: SimpleLLMMessage[] = []
+
+		if (summarizedContext) {
+			simpleLLMMessages.push({
+				role: 'user',
+				content: `<previous_context_summary>
+${summarizedContext.text}
+[Note: For exact code or complete tool outputs from older turns, read .void/session_memory/${threadId ? threadId : 'current'}.md]
+</previous_context_summary>`
+			});
+			chatMessages = chatMessages.slice(summarizedContext.summarizedUntilMessageIdx + 1);
+		}
 
 		for (const m of chatMessages) {
 			if (m.role === 'checkpoint') continue
@@ -644,9 +669,13 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 				})
 			}
 			else if (m.role === 'tool') {
+				let content = m.content;
+				if (content.length > 3000) {
+					content = content.substring(0, 3000) + `\n\n...[Content heavily truncated for brevity. Full output has been saved to your persistent brain file .void/session_memory/${threadId ? threadId : 'current'}.md]. Use the read_file tool to view details if needed.`;
+				}
 				simpleLLMMessages.push({
 					role: m.role,
-					content: m.content,
+					content: content,
 					name: m.name,
 					id: m.id,
 					rawParams: m.rawParams,
@@ -718,7 +747,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		})
 		return { messages, separateSystemMessage };
 	}
-	prepareLLMChatMessages: IConvertToLLMMessageService['prepareLLMChatMessages'] = async ({ chatMessages, chatMode, modelSelection, cachedContext }) => {
+	prepareLLMChatMessages: IConvertToLLMMessageService['prepareLLMChatMessages'] = async ({ chatMessages, chatMode, modelSelection, cachedContext, threadId, summarizedContext }) => {
 		if (modelSelection === null) return { messages: [], separateSystemMessage: undefined }
 
 		const { overridesOfModel } = this.voidSettingsService.state
@@ -772,7 +801,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const aiInstructions = this._getCombinedAIInstructions();
 		const isReasoningEnabled = getIsReasoningEnabledState('Chat', providerName, modelName, modelSelectionOptions, overridesOfModel)
 		const reservedOutputTokenSpace = getReservedOutputTokenSpace(providerName, modelName, { isReasoningEnabled, overridesOfModel })
-		const llmMessages = this._chatMessagesToSimpleMessages(chatMessages)
+		const llmMessages = this._chatMessagesToSimpleMessages(chatMessages, threadId, summarizedContext)
 
 		// --- Synthetic priming turn injection ---
 		// On the very first turn (no assistant or tool messages yet), inject a synthetic user turn

@@ -465,7 +465,7 @@ export type ChatSystemMessageParts = {
 	rulesBlock: string
 }
 
-export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, semanticSnippets, gatheredContext, chatMode: mode, mcpTools, includeXMLToolDefinitions, gitBranch, gitStatus }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], gatheredContext?: string, chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, gitBranch: string, gitStatus: string }): ChatSystemMessageParts => {
+export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, repoBrainContent, semanticSnippets, gatheredContext, chatMode: mode, mcpTools, includeXMLToolDefinitions, gitBranch, gitStatus }: { workspaceFolders: string[], repoBrainContent: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], semanticSnippets: string[], gatheredContext?: string, chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, gitBranch: string, gitStatus: string }): ChatSystemMessageParts => {
 	const header = (`You are an expert coding ${mode === 'agent' ? 'agent' : 'assistant'} whose job is \
 ${mode === 'agent' ? `to help the user develop, run, and make changes to their codebase.`
 			: mode === 'plan' ? `to plan and execute a coding task step-by-step.`
@@ -494,10 +494,11 @@ ${openedURIs.join('\n') || 'NONE'}${''/* separator */}${mode === 'agent' && pers
 </system_info>`)
 
 
-	const fsInfo = (`Here is an overview of the user's file system:
-<files_overview>
-${directoryStr}
-</files_overview>`)
+	const repoBrainBlock = (`Repository Memory (Global Scratchpad):
+<repo_brain>
+${repoBrainContent}
+</repo_brain>
+(Note: To understand the folder structure, use the 'get_dir_tree' tool. You may also update the repo_brain file at '.void/repo_brain.md' using the 'edit_file' tool to persist architectural knowledge across sessions.)`)
 
 	const semanticInfo = (semanticSnippets.length === 0 ? '' : `
 Here are some semantically relevant snippets from the codebase that might help you:
@@ -669,6 +670,7 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 	details.push(`Always use MARKDOWN to format lists, bullet points, etc. Do NOT write tables.`)
 	details.push(`Every response may contain at most ONE tool call. Multiple consecutive tool calls are not supported.`)
 	details.push(`TOOL REPETITION: Do NOT repeat the same tool call with identical parameters if it fails or produces the same result. If you are stuck or the result is unexpected, adjust your search terms, parameters, or approach. Identical repetitions will be blocked.`)
+	details.push(`MEMORY NOTE: Your tool execution results may be heavily truncated in this prompt to save token space! However, full transcripts of all your past successful tool executions are continuously logged to '.void/session_memory/'. If you forget a detail from a previous search or file read, do NOT ask the user; use the 'read_file' or 'grep_search' tools on the '.void/session_memory/' directory to retrieve it.`)
 	details.push(`Today's date is ${new Date().toDateString()}.`)
 
 	const importantDetails = (`Important notes:
@@ -679,7 +681,7 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 	const identityStrs: string[] = []
 	identityStrs.push(header)
 	identityStrs.push(sysInfo)
-	identityStrs.push(fsInfo)
+	identityStrs.push(repoBrainBlock)
 	if (gatheredContextInfo) identityStrs.push(gatheredContextInfo)
 	if (semanticSnippets.length > 0) identityStrs.push(semanticInfo)
 	if (toolDefinitions) identityStrs.push(toolDefinitions)

@@ -1143,13 +1143,10 @@ export const formatGatheredContextForPrompt = (context: GatheredContext): string
 		const symbols = file.symbols.length
 			? `\nSymbols: ${file.symbols.slice(0, 24).map(symbol => `${symbol.name} (${symbol.kind})`).join(', ')}`
 			: '';
-		const content = file.content
-			? `\nContent:\n\`\`\`\n${file.content}${file.contentTruncated ? '\n... file truncated ...' : ''}\n\`\`\``
-			: '';
-		return `File: ${file.path}\nRelevance score: ${file.relevanceScore}\nSearch hits: ${file.searchHitCount}${symbols}${content}`;
+		return `File: ${file.path}\nRelevance score: ${file.relevanceScore}\nSearch hits: ${file.searchHitCount}${symbols}`;
 	});
 
-	return `Task terms: ${context.terms.join(', ') || '(none)'}\n\nRelevant files:\n${files.join('\n\n')}`;
+	return `Task terms: ${context.terms.join(', ') || '(none)'}\n\nRelevant files:\n${files.join('\n\n')}\n\n(Note: File contents are omitted to save space. Use the 'read_file' tool to read the full context of any of the suggested files above.)`;
 };
 
 export const summarizeGatheredContextForLog = (context: GatheredContext, maxFiles = 3): string => {

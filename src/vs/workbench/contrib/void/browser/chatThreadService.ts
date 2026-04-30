@@ -216,7 +216,10 @@ export type ThreadType = {
 			taskJournal: PlanTaskJournalEntry[];
 		}
 
-
+		summarizedContext?: {
+			text: string;
+			summarizedUntilMessageIdx: number;
+		};
 	};
 }
 
@@ -1043,6 +1046,29 @@ Important:
 
 
 	// returns true when the tool call is waiting for user approval
+	private async _appendBrainFile(threadId: string, content: string) {
+		const workspaceFolders = this._workspaceContextService.getWorkspace().folders;
+		if (!workspaceFolders || workspaceFolders.length === 0) return;
+
+		const baseUri = workspaceFolders[0].uri;
+		const brainDir = URI.joinPath(baseUri, '.void', 'session_memory');
+		const brainUri = URI.joinPath(brainDir, `${threadId}.md`);
+
+		try {
+			try { await this._fileService.createFolder(brainDir); } catch (e) { }
+			let existingContent = '';
+			try {
+				const fileContent = await this._fileService.readFile(brainUri);
+				existingContent = fileContent.value.toString() + '\n\n';
+			} catch (e) {
+				existingContent = `# Session Brain Memory\nThread ID: ${threadId}\n\n`;
+			}
+			await this._fileService.writeFile(brainUri, VSBuffer.fromString(existingContent + content));
+		} catch (e) {
+			console.error('Failed to write to brain file', e);
+		}
+	}
+
 	private _runToolCall = async (
 		threadId: string,
 		toolName: ToolName,
@@ -1218,12 +1244,109 @@ Important:
 		const isRepetition = this._lastSuccessfulToolFingerprintOfThreadId[threadId] === fingerprint
 		this._lastSuccessfulToolFingerprintOfThreadId[threadId] = fingerprint
 
+		const paramsStr = typeof opts.unvalidatedToolParams === 'string' ? opts.unvalidatedToolParams : JSON.stringify(opts.unvalidatedToolParams, null, 2);
+		this._appendBrainFile(threadId, `## Tool Execution: ${toolName}\n**Parameters:**\n\`\`\`json\n${paramsStr}\n\`\`\`\n**Result:**\n\`\`\`\n${toolResultStr}\n\`\`\``).catch(e => console.error(e));
+
 		this._updateLatestTool(threadId, { role: 'tool', type: 'success', params: toolParams, result: toolResult, name: toolName, content: toolResultStr, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
 		console.log(`[Void][AgentLoop][${threadId}] tool=${toolName} succeeded in ${Date.now() - toolCallStart}ms`);
 		this._appendDebugLog(threadId, { direction: 'tool_execution_result', toolName, result: toolResultStr }).catch(e => console.error(e));
 		return { isRepetition }
 	};
 
+
+	// ----------------------------------------------------------------------------------------------------------------
+	// Context Summarizer (Async Background Task)
+	private _isSummarizingOfThreadId: Record<string, boolean> = {};
+
+	private async _backgroundSummarizeContext(threadId: string) {
+		if (this._isSummarizingOfThreadId[threadId]) return;
+		this._isSummarizingOfThreadId[threadId] = true;
+
+		try {
+			const thread = this.state.allThreads[threadId];
+			if (!thread) return;
+
+			// We need a chunk of at least 6 messages before the last 3.
+			const lastSummarizedIdx = thread.state.summarizedContext?.summarizedUntilMessageIdx ?? -1;
+			const targetUntilIdx = thread.messages.length - 4; // up to the 4th from last
+
+			if (targetUntilIdx - lastSummarizedIdx < 6) return; // Wait until we have enough new messages
+
+			const messagesToSummarize = thread.messages.slice(lastSummarizedIdx + 1, targetUntilIdx + 1);
+			if (messagesToSummarize.length === 0) return;
+
+			const chatChunk = messagesToSummarize.map(m => {
+				if (m.role === 'tool') return `TOOL (${m.name}): [details omitted, visible in session memory]`;
+				if (m.role === 'user') return `USER: ${m.content}`;
+				if (m.role === 'assistant') {
+					if (m.displayContent || m.anthropicReasoning) {
+						return `ASSISTANT:\n${m.displayContent || '[reasoning emitted]'}`;
+					}
+					return `ASSISTANT: [Called tool]`;
+				}
+				return null;
+			}).filter(Boolean).join('\n---\n');
+
+			const previousSummaryObj = thread.state.summarizedContext;
+			const previousSummaryStr = previousSummaryObj ? `\n\nPrevious Summary block that you should merge this new information with:\n<previous_summary>\n${previousSummaryObj.text}\n</previous_summary>` : '';
+
+			const promptObj: LLMChatMessage = {
+				role: 'user',
+				content: `Please read the following conversation chunk and provide an updated, concise summary of the architectural context, user intent, discovered codebase structure, and what the agent has successfully accomplished so far.
+Do not emit raw code files.
+Do not hallucinate details.
+Keep it strictly under 500 words.
+${previousSummaryStr}
+
+New Conversation Chunk:
+<conversation_chunk>
+${chatChunk}
+</conversation_chunk>`
+			};
+
+			const { chatMode } = this._settingsService.state.globalSettings;
+			const overridesOfModel = this._settingsService.state.overridesOfModel
+
+			// Hardcode explicitly to gpt-4o-mini for the background summarizer
+			const modelSelection: ModelSelection = { providerName: 'localProxy', modelName: 'gpt-4o-mini' };
+			const modelSelectionOptions = (this._settingsService.state.optionsOfModelSelection['Chat'] as any)[modelSelection?.providerName ?? '']?.[modelSelection?.modelName ?? '']
+
+			if (!modelSelection) return;
+
+			await new Promise<void>((resolve) => {
+				this._llmMessageService.sendLLMMessage({
+					messagesType: 'chatMessages',
+					chatMode,
+					messages: [promptObj],
+					modelSelection,
+					modelSelectionOptions,
+					overridesOfModel,
+					logging: { loggingName: `Background Summarizer`, loggingExtras: { threadId } },
+					separateSystemMessage: "You are a context compresser.",
+					onText: () => { },
+					onFinalMessage: async ({ fullText }) => {
+						const targetThread = this.state.allThreads[threadId];
+						if (targetThread) {
+							targetThread.state.summarizedContext = { text: fullText.trim(), summarizedUntilMessageIdx: targetUntilIdx };
+							if (threadId === this.state.currentThreadId) this._onDidChangeCurrentThread.fire();
+						}
+						console.log(`[Void][BackgroundSummarizer][${threadId}] Summary completed until message ${targetUntilIdx}.`);
+						resolve();
+					},
+					onError: async (error) => {
+						console.error(`[Void][BackgroundSummarizer] Error:`, error);
+						resolve();
+					},
+					onAbort: () => { resolve(); }
+				});
+			});
+		} catch (e) {
+			console.error(`[Void][BackgroundSummarizer] Exception:`, e);
+		} finally {
+			this._isSummarizingOfThreadId[threadId] = false;
+		}
+	}
+	// ----------------------------------------------------------------------------------------------------------------
 
 
 
@@ -1281,6 +1404,9 @@ Important:
 
 			this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
 
+			// [Context Summarizer] Fire-and-forget background job to compress older history
+			this._backgroundSummarizeContext(threadId).catch(console.error);
+
 			const chatMessages = this.state.allThreads[threadId]?.messages ?? []
 			const prepareStart = Date.now();
 			console.log(`[Void][AgentLoop][${threadId}] preparing chat messages (iteration=${nMessagesSent}, mode=${chatMode}, history=${chatMessages.length})`);
@@ -1288,7 +1414,9 @@ Important:
 				chatMessages,
 				modelSelection,
 				chatMode,
-				cachedContext
+				cachedContext,
+				threadId,
+				summarizedContext: this.state.allThreads[threadId]?.state.summarizedContext,
 			})
 			cachedContext = newCachedContext;
 			console.log(`[Void][AgentLoop][${threadId}] prepared chat messages in ${Date.now() - prepareStart}ms (iteration=${nMessagesSent}, outbound=${messages.length}, separateSystem=${!!separateSystemMessage})`);
@@ -1393,6 +1521,12 @@ Important:
 				}
 				// llm res error
 				else if (llmRes.type === 'llmError') {
+
+					if (llmRes.error?.message === 'Void: Response from model was empty.' && !correctiveRetryInstruction) {
+						correctiveRetryInstruction = 'Your previous response was completely empty. Please try again and complete your thoughts. Remember to use a tool call if necessary.';
+						nAttempts = 0; // Reset network attempts to give the semantic retry a full chance
+					}
+
 					// error, should retry
 					if (nAttempts < CHAT_RETRIES) {
 						shouldRetryLLM = true
