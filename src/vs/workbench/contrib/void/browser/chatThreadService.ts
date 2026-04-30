@@ -1440,15 +1440,21 @@ ${chatChunk}
 				let resMessageIsDonePromise: (res: ResTypes) => void // resolves when user approves this tool use (or if tool doesn't require approval)
 				const messageIsDonePromise = new Promise<ResTypes>((res, rej) => { resMessageIsDonePromise = res })
 
-				const outboundMessages: LLMChatMessage[] = correctiveRetryInstruction
-					? [
-						...messages,
-						{
-							role: 'user',
-							content: correctiveRetryInstruction,
-						} as LLMChatMessage
-					]
-					: messages
+				let outboundMessages: LLMChatMessage[] = messages;
+				if (correctiveRetryInstruction) {
+					const lastMsg = messages[messages.length - 1];
+					if (lastMsg && lastMsg.role === 'user' && typeof (lastMsg as any).content === 'string') {
+						outboundMessages = [
+							...messages.slice(0, -1),
+							{ ...lastMsg, content: (lastMsg as any).content + '\n\n' + correctiveRetryInstruction }
+						];
+					} else {
+						outboundMessages = [
+							...messages,
+							{ role: 'user', content: correctiveRetryInstruction } as LLMChatMessage
+						];
+					}
+				}
 				if (correctiveRetryInstruction) {
 					totalCorrectiveRetries++;
 					if (totalCorrectiveRetries >= MAX_TOTAL_CORRECTIVE_RETRIES) {
