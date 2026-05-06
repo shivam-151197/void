@@ -21,6 +21,7 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 	}
 
 	private async _getDb(): Promise<Database> {
+		console.log('[VoidIndexMainService] DATABASE PATH:', this._dbPath);
 		if (this._db) {
 			return this._db;
 		}
@@ -58,8 +59,30 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 							}
 
 							const hasParentId = columns.some(c => c.name === 'parentId');
+							const hasRole = columns.some(c => c.name === 'role');
+							const hasMetadata = columns.some(c => c.name === 'metadata');
 							
 							const completeInit = () => {
+								// 4. Auto-repair: If we have files but no symbols, clear the files table to force a re-index
+								db.get('SELECT COUNT(*) as symbolCount FROM symbols', (err, sRow: any) => {
+									if (!err && sRow && sRow.symbolCount === 0) {
+										db.get('SELECT COUNT(*) as fileCount FROM files', (err, fRow: any) => {
+											if (!err && fRow && fRow.fileCount > 0) {
+												console.log('[VoidIndexMainService] Inconsistent state detected (files but no symbols). Clearing files table for fresh index...');
+												db.run('DELETE FROM files', () => {
+													finalizeInit();
+												});
+											} else {
+												finalizeInit();
+											}
+										});
+									} else {
+										finalizeInit();
+									}
+								});
+							};
+
+							const finalizeInit = () => {
 								db.serialize(() => {
 									db.run('CREATE INDEX IF NOT EXISTS idx_symbols_uri ON symbols(uri)', (err) => {
 										if (err) console.error('[VoidIndexMainService] Error creating index idx_symbols_uri:', err);
@@ -83,10 +106,22 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 								});
 							};
 
-							if (!hasParentId) {
-								db.run('ALTER TABLE symbols ADD COLUMN parentId TEXT', (err) => {
-									if (err) {
-										console.error('[VoidIndexMainService] Error adding parentId column:', err);
+							if (!hasParentId || !hasRole || !hasMetadata) {
+								db.serialize(() => {
+									if (!hasParentId) {
+										db.run('ALTER TABLE symbols ADD COLUMN parentId TEXT', (err) => {
+											if (err) console.error('[VoidIndexMainService] Error adding parentId column:', err);
+										});
+									}
+									if (!hasRole) {
+										db.run('ALTER TABLE symbols ADD COLUMN role TEXT', (err) => {
+											if (err) console.error('[VoidIndexMainService] Error adding role column:', err);
+										});
+									}
+									if (!hasMetadata) {
+										db.run('ALTER TABLE symbols ADD COLUMN metadata TEXT', (err) => {
+											if (err) console.error('[VoidIndexMainService] Error adding metadata column:', err);
+										});
 									}
 									completeInit();
 								});
@@ -107,7 +142,9 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 		const db = await this._getDb();
 		return new Promise((resolve, reject) => {
 			db.serialize(() => {
-				db.run('BEGIN TRANSACTION');
+				db.run('BEGIN TRANSACTION', (err) => {
+					if (err) console.error('[VoidIndexMainService] BEGIN TRANSACTION failed:', err);
+				});
 				db.run('INSERT OR REPLACE INTO files (uri, hash, lastIndexed) VALUES (?, ?, ?)', [uri, hash, Date.now()]);
 				db.run('DELETE FROM symbols WHERE uri = ?', [uri]);
 				db.run('DELETE FROM edges WHERE sourceUri = ?', [uri]);
@@ -131,7 +168,9 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 						symbol.range.endColumn,
 						symbol.text,
 						embeddingBlob
-					]);
+					], (err) => {
+						if (err) console.error(`[VoidIndexMainService] Error inserting symbol ${symbol.name} in ${uri}:`, err);
+					});
 				}
 				symbolStmt.finalize();
 
@@ -151,9 +190,11 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 				edgeStmt.finalize();
 				db.run('COMMIT', (err) => {
 					if (err) {
-						console.error('[VoidIndexMainService] Error committing transaction:', err);
+						console.error('[VoidIndexMainService] COMMIT failed:', err);
+						db.run('ROLLBACK');
 						return reject(err);
 					}
+					console.log(`[VoidIndexMainService] Successfully indexed file: ${uri}`);
 					resolve();
 				});
 			});
@@ -539,5 +580,80 @@ export class VoidIndexMainService implements IVoidIndexMainService {
 			type: row.type,
 			metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
 		};
+	}
+	async exportGraph(workspaceUri: string): Promise<void> {
+		const db = await this._getDb();
+		const fs = await import('fs/promises');
+		const path = await import('path');
+		const baseUri = URI.parse(workspaceUri);
+		
+		console.log(`[VoidIndexMainService] Exporting graph for workspace: ${workspaceUri}`);
+		const dbSize = await this._all(db, 'SELECT COUNT(*) as count FROM symbols', [], row => row.count);
+		console.log(`[VoidIndexMainService] Total symbols in DB: ${dbSize[0]}`);
+		const sampleUris = await this._all(db, 'SELECT DISTINCT uri FROM symbols LIMIT 5', [], row => row.uri);
+		console.log(`[VoidIndexMainService] Sample URIs in DB: ${JSON.stringify(sampleUris)}`);
+
+		const workspaceUriNoSlash = workspaceUri.endsWith('/') ? workspaceUri.slice(0, -1) : workspaceUri;
+		const workspaceUriWithSlash = workspaceUriNoSlash + '/';
+
+		const symbols = await this._all(db, 'SELECT * FROM symbols WHERE uri LIKE ? OR uri = ?', [`${workspaceUriWithSlash}%`, workspaceUriNoSlash], row => this._mapRowToSymbol(row));
+		const edges = await this._all(db, 'SELECT * FROM edges WHERE sourceUri LIKE ? OR sourceUri = ?', [`${workspaceUriWithSlash}%`, workspaceUriNoSlash], row => this._mapRowToEdge(row));
+
+		// Reachability Analysis
+		const entryPoints = symbols.filter(s => {
+			const filename = s.uri.path.split('/').pop()?.toLowerCase() || '';
+			return s.type === 'file' && (filename.startsWith('index.') || filename.startsWith('main.') || filename.startsWith('app.'));
+		});
+
+		const reachableNodes = new Set<string>();
+		const queue = [...entryPoints.map(s => s.id)];
+		
+		// Build adjacency list for fast BFS
+		const adjacency = new Map<string, string[]>();
+		for (const edge of edges) {
+			if (edge.targetId) {
+				const list = adjacency.get(edge.sourceId) || [];
+				list.push(edge.targetId);
+				adjacency.set(edge.sourceId, list);
+			}
+		}
+
+		while (queue.length > 0) {
+			const currentId = queue.shift()!;
+			if (!reachableNodes.has(currentId)) {
+				reachableNodes.add(currentId);
+				const neighbors = adjacency.get(currentId) || [];
+				for (const next of neighbors) {
+					if (!reachableNodes.has(next)) {
+						queue.push(next);
+					}
+				}
+			}
+		}
+
+		const graphDir = path.join(baseUri.fsPath, '.void', 'graph');
+		await fs.mkdir(graphDir, { recursive: true });
+		
+		const graphData = {
+			nodes: symbols.map(s => ({
+				id: s.id,
+				uri: s.uri.toString(),
+				name: s.name,
+				type: s.type,
+				role: s.role,
+				parentId: s.parentId,
+				range: s.range,
+				isReachable: reachableNodes.has(s.id)
+			})),
+			edges: edges.map(e => ({
+				id: e.id,
+				sourceId: e.sourceId,
+				targetId: e.targetId,
+				type: e.type
+			}))
+		};
+		
+		await fs.writeFile(path.join(graphDir, 'graph.json'), JSON.stringify(graphData, null, 2));
+		console.log(`[VoidIndexMainService] Exported graph to ${graphDir}/graph.json with ${symbols.length} nodes (${reachableNodes.size} reachable) and ${edges.length} edges`);
 	}
 }

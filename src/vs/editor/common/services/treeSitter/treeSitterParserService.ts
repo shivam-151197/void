@@ -16,8 +16,6 @@ import { IEnvironmentService } from '../../../../platform/environment/common/env
 import { TextModelTreeSitter, TextModelTreeSitterItem } from './textModelTreeSitter.js';
 import { getModuleLocation, TreeSitterLanguages } from './treeSitterLanguages.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
-
-const EDITOR_TREESITTER_TELEMETRY = 'editor.experimental.treeSitterTelemetry';
 const FILENAME_TREESITTER_WASM = `tree-sitter.wasm`;
 
 export class TreeSitterTextModelService extends Disposable implements ITreeSitterParserService {
@@ -129,12 +127,9 @@ export class TreeSitterTextModelService extends Disposable implements ITreeSitte
 		let hasLanguages = false;
 
 		const handleLanguage = (languageId: string) => {
-			if (this._getSetting(languageId)) {
-				hasLanguages = true;
-				this._addGrammar(languageId, `tree-sitter-${languageId}`);
-			} else {
-				this._removeGrammar(languageId);
-			}
+			// Void needs these languages registered regardless of telemetry settings
+			hasLanguages = true;
+			this._addGrammar(languageId, `tree-sitter-${languageId}`);
 		};
 
 		// Eventually, this should actually use an extension point to add tree sitter grammars, but for now they are hard coded in core
@@ -145,13 +140,7 @@ export class TreeSitterTextModelService extends Disposable implements ITreeSitte
 		return this._initParser(hasLanguages);
 	}
 
-	private _getSetting(languageId: string): boolean {
-		const setting = this._configurationService.getValue<boolean>(`${EDITOR_EXPERIMENTAL_PREFER_TREESITTER}.${languageId}`);
-		if (!setting && TREESITTER_ALLOWED_SUPPORT.includes(languageId)) {
-			return this._configurationService.getValue<boolean>(EDITOR_TREESITTER_TELEMETRY);
-		}
-		return setting;
-	}
+
 
 	private async _registerModelServiceListeners() {
 		this._register(this._modelService.onModelAdded(model => {
@@ -191,11 +180,7 @@ export class TreeSitterTextModelService extends Disposable implements ITreeSitte
 		}
 	}
 
-	private _removeGrammar(languageId: string) {
-		if (this._registeredLanguages.has(languageId)) {
-			this._registeredLanguages.delete(languageId);
-		}
-	}
+
 }
 
 

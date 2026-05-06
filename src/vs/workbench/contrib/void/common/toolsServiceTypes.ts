@@ -62,6 +62,8 @@ export type BuiltinToolCallParams = {
 	'kill_persistent_terminal': { persistentTerminalId: string },
 	'semantic_search': { query: string, limit: number },
 	'search_codebase': { query: string, searchType: 'ownership' | 'references' | 'definition' | 'callers' },
+	'recall_memory': { ref: string },
+	'read_symbol': { query: string },
 }
 
 // RESULT OF TOOL CALL
@@ -98,6 +100,8 @@ export type BuiltinToolResultType = {
 		suggested_next: string;
 		error?: string;
 	},
+	'recall_memory': { content: string },
+	'read_symbol': { symbols: import('./index/indexServiceTypes.js').IndexedSymbol[] },
 }
 
 

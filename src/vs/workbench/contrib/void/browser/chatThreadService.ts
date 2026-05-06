@@ -437,6 +437,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		// always be in a thread
 		this.openNewThread()
 
+		// P1: restore persisted summarizedContext from disk for all threads
+		this._restoreAllSummarizedContexts().catch(e => console.error('[Void][SummaryRestore] Failed:', e));
+
+		// P2: wire recall_memory fn into toolsService
+		this._toolsService.setRecallMemoryFn((ref) => this._recallMemory(ref));
 
 		// keep track of user-modified files
 		// const disposablesOfModelId: { [modelId: string]: IDisposable[] } = {}
@@ -687,6 +692,7 @@ Important:
 			'search_in_file',
 			'read_lint_errors',
 			'semantic_search',
+			'read_symbol',
 		]);
 		return !readOnlyTools.has(toolName);
 	}
@@ -733,7 +739,7 @@ Important:
 	private _hasPerformedImpactAnalysis(threadId: string): boolean {
 		const thread = this.state.allThreads[threadId]
 		if (!thread) return false
-		const searchTools = new Set(['search_for_files', 'semantic_search', 'search_in_file'])
+		const searchTools = new Set(['search_for_files', 'semantic_search', 'search_in_file', 'read_symbol'])
 		return thread.messages.some(m => m.role === 'tool' && m.type === 'success' && searchTools.has(m.name))
 	}
 
@@ -789,6 +795,7 @@ Important:
 			'search_pathnames_only',
 			'search_in_file',
 			'semantic_search',
+			'read_symbol',
 		]);
 		return this._successfulToolMessagesForCurrentTask(threadId).some(message => discoveryTools.has(message.name));
 	}
@@ -813,6 +820,7 @@ Important:
 			'search_pathnames_only',
 			'search_in_file',
 			'semantic_search',
+			'read_symbol',
 		])
 		return thread.messages.some(message =>
 			message.role === 'tool' &&
@@ -1063,7 +1071,10 @@ Important:
 			} catch (e) {
 				existingContent = `# Session Brain Memory\nThread ID: ${threadId}\n\n`;
 			}
-			await this._fileService.writeFile(brainUri, VSBuffer.fromString(existingContent + content));
+			// P2: register this content in the memRef index so recall_memory can retrieve it
+			const ref = this._storeMemRef(threadId, content);
+			const taggedContent = `<!-- memRef: ${ref} -->\n${content}`;
+			await this._fileService.writeFile(brainUri, VSBuffer.fromString(existingContent + taggedContent));
 		} catch (e) {
 			console.error('Failed to write to brain file', e);
 		}
@@ -1257,6 +1268,76 @@ Important:
 	// ----------------------------------------------------------------------------------------------------------------
 	// Context Summarizer (Async Background Task)
 	private _isSummarizingOfThreadId: Record<string, boolean> = {};
+	// P2: per-thread memory index: ref -> full content
+	private _memoryIndexOfThreadId: Record<string, Record<string, string>> = {};
+	private _memRefCounterOfThreadId: Record<string, number> = {};
+
+	/** P1: Restore all persisted summarizedContexts from disk after startup */
+	private async _restoreAllSummarizedContexts() {
+		const workspaceURI = this._primaryWorkspaceURI();
+		if (!workspaceURI) return;
+		const threads = this.state.allThreads;
+		for (const threadId in threads) {
+			try {
+				const summaryUri = URI.joinPath(workspaceURI, '.void', 'session_memory', `${threadId}.summary.json`);
+				const file = await this._fileService.readFile(summaryUri);
+				const saved = JSON.parse(file.value.toString()) as { text: string; summarizedUntilMessageIdx: number };
+				if (saved.text && typeof saved.summarizedUntilMessageIdx === 'number') {
+					const thread = this.state.allThreads[threadId];
+					if (thread) {
+						thread.state.summarizedContext = saved;
+						console.log(`[Void][SummaryRestore] Restored summarizedContext for thread ${threadId} (until msg ${saved.summarizedUntilMessageIdx})`);
+					}
+				}
+			} catch (e) {
+				// no summary on disk yet — that's fine
+			}
+		}
+	}
+
+	/** P2: Write a memRef entry into the in-memory index and return the ref ID */
+	private _storeMemRef(threadId: string, content: string): string {
+		if (!this._memRefCounterOfThreadId[threadId]) this._memRefCounterOfThreadId[threadId] = 0;
+		this._memRefCounterOfThreadId[threadId]++;
+		const ref = `mem-${this._memRefCounterOfThreadId[threadId]}`;
+		if (!this._memoryIndexOfThreadId[threadId]) this._memoryIndexOfThreadId[threadId] = {};
+		this._memoryIndexOfThreadId[threadId][ref] = content;
+		return ref;
+	}
+
+	/** P2: Retrieve stored full content by memRef */
+	private async _recallMemory(ref: string): Promise<string | null> {
+		const match = ref.match(/^mem-(\d+)$/);
+		if (!match) return null;
+		const id = parseInt(match[1], 10);
+		if (isNaN(id)) return null;
+
+		const threadId = this.state.currentThreadId;
+		const thread = this.state.allThreads[threadId];
+		if (!thread) return null;
+
+		let chatMessages = thread.messages;
+		const summarizedContext = thread.state.summarizedContext;
+		if (summarizedContext && summarizedContext.summarizedUntilMessageIdx < chatMessages.length) {
+			chatMessages = chatMessages.slice(summarizedContext.summarizedUntilMessageIdx + 1);
+		}
+
+		let toolTruncRefCounter = 0;
+		for (const m of chatMessages) {
+			if (m.role === 'checkpoint') continue;
+			if (m.role === 'interrupted_streaming_tool') continue;
+			if (m.role === 'tool') {
+				if (m.content && m.content.length > 3000) {
+					toolTruncRefCounter++;
+					if (toolTruncRefCounter === id) {
+						return m.content;
+					}
+				}
+			}
+		}
+
+		return null;
+	}
 
 	private async _backgroundSummarizeContext(threadId: string) {
 		if (this._isSummarizingOfThreadId[threadId]) return;
@@ -1266,11 +1347,10 @@ Important:
 			const thread = this.state.allThreads[threadId];
 			if (!thread) return;
 
-			// We need a chunk of at least 6 messages before the last 3.
 			const lastSummarizedIdx = thread.state.summarizedContext?.summarizedUntilMessageIdx ?? -1;
-			const targetUntilIdx = thread.messages.length - 4; // up to the 4th from last
+			const targetUntilIdx = thread.messages.length - 4;
 
-			if (targetUntilIdx - lastSummarizedIdx < 6) return; // Wait until we have enough new messages
+			if (targetUntilIdx - lastSummarizedIdx < 6) return;
 
 			const messagesToSummarize = thread.messages.slice(lastSummarizedIdx + 1, targetUntilIdx + 1);
 			if (messagesToSummarize.length === 0) return;
@@ -1288,30 +1368,38 @@ Important:
 			}).filter(Boolean).join('\n---\n');
 
 			const previousSummaryObj = thread.state.summarizedContext;
-			const previousSummaryStr = previousSummaryObj ? `\n\nPrevious Summary block that you should merge this new information with:\n<previous_summary>\n${previousSummaryObj.text}\n</previous_summary>` : '';
+			const previousSummaryStr = previousSummaryObj
+				? `\n\nPrevious summary to merge with:\n<previous_summary>\n${previousSummaryObj.text}\n</previous_summary>`
+				: '';
 
+			// P5: Structured summary schema
 			const promptObj: LLMChatMessage = {
 				role: 'user',
-				content: `Please read the following conversation chunk and provide an updated, concise summary of the architectural context, user intent, discovered codebase structure, and what the agent has successfully accomplished so far.
-Do not emit raw code files.
-Do not hallucinate details.
-Keep it strictly under 500 words.
+				content: `Read the conversation chunk below and output an updated structured summary.
+Do NOT emit raw code. Do NOT hallucinate. Be concise.
 ${previousSummaryStr}
 
 New Conversation Chunk:
 <conversation_chunk>
 ${chatChunk}
-</conversation_chunk>`
+</conversation_chunk>
+
+Output ONLY the following XML structure (no prose before or after):
+<summary>
+<intent>One sentence: what is the user trying to accomplish?</intent>
+<files_modified>Comma-separated list of files changed so far, or "none".</files_modified>
+<decisions>Key architectural or design decisions made.</decisions>
+<current_state>What has been completed and what remains to be done.</current_state>
+</summary>`
 			};
 
 			const { chatMode } = this._settingsService.state.globalSettings;
-			const overridesOfModel = this._settingsService.state.overridesOfModel
+			const overridesOfModel = this._settingsService.state.overridesOfModel;
 
-			// Hardcode explicitly to gpt-4o-mini for the background summarizer
-			const modelSelection: ModelSelection = { providerName: 'localProxy', modelName: 'gpt-4o-mini' };
-			const modelSelectionOptions = (this._settingsService.state.optionsOfModelSelection['Chat'] as any)[modelSelection?.providerName ?? '']?.[modelSelection?.modelName ?? '']
-
-			if (!modelSelection) return;
+			// P3: use active Chat model, fall back to localProxy/gpt-4o-mini
+			const activeModelSelection = this._settingsService.state.modelSelectionOfFeature['Chat'];
+			const modelSelection: ModelSelection = activeModelSelection ?? { providerName: 'localProxy', modelName: 'gpt-4o-mini' };
+			const modelSelectionOptions = (this._settingsService.state.optionsOfModelSelection['Chat'] as any)[modelSelection.providerName]?.[modelSelection.modelName];
 
 			await new Promise<void>((resolve) => {
 				this._llmMessageService.sendLLMMessage({
@@ -1322,13 +1410,28 @@ ${chatChunk}
 					modelSelectionOptions,
 					overridesOfModel,
 					logging: { loggingName: `Background Summarizer`, loggingExtras: { threadId } },
-					separateSystemMessage: "You are a context compresser.",
+					separateSystemMessage: 'You are a concise context summarizer.',
 					onText: () => { },
 					onFinalMessage: async ({ fullText }) => {
 						const targetThread = this.state.allThreads[threadId];
 						if (targetThread) {
-							targetThread.state.summarizedContext = { text: fullText.trim(), summarizedUntilMessageIdx: targetUntilIdx };
+							const summaryText = fullText.trim();
+							targetThread.state.summarizedContext = { text: summaryText, summarizedUntilMessageIdx: targetUntilIdx };
 							if (threadId === this.state.currentThreadId) this._onDidChangeCurrentThread.fire();
+							// P1: persist to disk so it survives restarts
+							try {
+								const workspaceURI = this._primaryWorkspaceURI();
+								if (workspaceURI) {
+									const summaryDir = URI.joinPath(workspaceURI, '.void', 'session_memory');
+									const summaryUri = URI.joinPath(summaryDir, `${threadId}.summary.json`);
+									try { await this._fileService.createFolder(summaryDir); } catch (e) { }
+									await this._fileService.writeFile(summaryUri, VSBuffer.fromString(
+										JSON.stringify({ text: summaryText, summarizedUntilMessageIdx: targetUntilIdx })
+									));
+								}
+							} catch (e) {
+								console.error('[Void][BackgroundSummarizer] Failed to persist summary to disk:', e);
+							}
 						}
 						console.log(`[Void][BackgroundSummarizer][${threadId}] Summary completed until message ${targetUntilIdx}.`);
 						resolve();
@@ -1344,6 +1447,85 @@ ${chatChunk}
 			console.error(`[Void][BackgroundSummarizer] Exception:`, e);
 		} finally {
 			this._isSummarizingOfThreadId[threadId] = false;
+		}
+	}
+
+	/** P4: After agent loop ends, extract new knowledge and append to repo_brain.md */
+	private async _maybePersistLearningsToRepoBrain(threadId: string) {
+		const thread = this.state.allThreads[threadId];
+		if (!thread) return;
+
+		let summaryText = thread.state.summarizedContext?.text || '';
+		
+		// If there is no summary yet (or we want to include recent unsummarized messages),
+		// we append the recent chat history to the context to be analyzed.
+		const lastSummarizedIdx = thread.state.summarizedContext?.summarizedUntilMessageIdx ?? -1;
+		const unsummarizedMessages = thread.messages.slice(lastSummarizedIdx + 1);
+		
+		if (unsummarizedMessages.length > 0) {
+			const recentChat = unsummarizedMessages.map(m => {
+				if (m.role === 'tool') return `TOOL (${m.name}): [details omitted]`;
+				if (m.role === 'user' || m.role === 'assistant') {
+					const rawContent = (m as any).content || (m as any).displayContent || '';
+					const content = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent);
+					return `${m.role.toUpperCase()}: ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`;
+				}
+				return `[${m.role}]`;
+			}).join('\n\n');
+			summaryText += (summaryText ? '\n\nRecent Chat:\n' : '') + recentChat;
+		}
+
+		if (!summaryText.trim()) return;
+
+		try {
+			const activeModelSelection = this._settingsService.state.modelSelectionOfFeature['Chat'];
+			const modelSelection: ModelSelection = activeModelSelection ?? { providerName: 'localProxy', modelName: 'gpt-4o-mini' };
+			const overridesOfModel = this._settingsService.state.overridesOfModel;
+			const { chatMode } = this._settingsService.state.globalSettings;
+			const modelSelectionOptions = (this._settingsService.state.optionsOfModelSelection['Chat'] as any)[modelSelection.providerName]?.[modelSelection.modelName];
+
+			const promptObj: LLMChatMessage = {
+				role: 'user',
+				content: `Given this session summary, extract ONLY new architectural facts that should be persisted to a global repository brain file. Output only 1-5 concise bullet points. If nothing is genuinely new or architectural, output "(nothing to persist)".
+
+Session summary:
+${summaryText}`
+			};
+
+			await new Promise<void>((resolve) => {
+				this._llmMessageService.sendLLMMessage({
+					messagesType: 'chatMessages',
+					chatMode,
+					messages: [promptObj],
+					modelSelection,
+					modelSelectionOptions,
+					overridesOfModel,
+					logging: { loggingName: 'RepoBrain Flush', loggingExtras: { threadId } },
+					separateSystemMessage: 'You are a concise technical knowledge extractor.',
+					onText: () => { },
+					onFinalMessage: async ({ fullText }) => {
+						const delta = fullText.trim();
+						if (!delta || delta === '(nothing to persist)') { resolve(); return; }
+						const workspaceURI = this._primaryWorkspaceURI();
+						if (!workspaceURI) { resolve(); return; }
+						const brainUri = URI.joinPath(workspaceURI, '.void', 'repo_brain.md');
+						try {
+							let existing = '';
+							try { existing = (await this._fileService.readFile(brainUri)).value.toString(); } catch (e) { }
+							const updated = existing + `\n\n## Session ${new Date().toISOString().slice(0, 10)}\n${delta}`;
+							await this._fileService.writeFile(brainUri, VSBuffer.fromString(updated));
+							console.log(`[Void][RepoBrainFlush][${threadId}] Appended ${delta.length} chars to repo_brain.md`);
+						} catch (e) {
+							console.error('[Void][RepoBrainFlush] Failed to write repo_brain:', e);
+						}
+						resolve();
+					},
+					onError: async () => resolve(),
+					onAbort: () => resolve(),
+				});
+			});
+		} catch (e) {
+			console.error('[Void][RepoBrainFlush] Exception:', e);
 		}
 	}
 	// ----------------------------------------------------------------------------------------------------------------
@@ -1614,6 +1796,10 @@ ${chatChunk}
 
 				console.log(`[Void][AgentLoop][${threadId}] LLM iteration=${nMessagesSent} completed with toolCall=${toolCall?.name ?? 'none'} textLength=${info.fullText.length}`);
 
+				// Always save the assistant's message before any retry logic, so that if we
+				// reject a plan, the model can see the plan it just wrote before the rejection.
+				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, anthropicReasoning: info.anthropicReasoning })
+
 				const latestAssistantPlanAlreadyExists = chatMessages.some(m => m.role === 'assistant' && !!extractTagBlock(m.displayContent, 'plan'))
 				const hasSuccessfulToolContext = chatMessages.some(m => m.role === 'tool' && m.type === 'success')
 				const hasPlanBlock = !!extractTagBlock(info.fullText, 'plan')
@@ -1786,7 +1972,6 @@ ${chatChunk}
 
 				correctiveRetryInstruction = null
 
-				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, anthropicReasoning: info.anthropicReasoning })
 				if (chatMode === 'plan') {
 					await this._persistPlanArtifactsFromAssistant(threadId, info.fullText)
 				}
@@ -1974,6 +2159,11 @@ ${chatChunk}
 
 		// add checkpoint before the next user message
 		if (!isRunningWhenEnd) this._addUserCheckpoint({ threadId })
+
+		// P4: fire-and-forget repo_brain flush after normal completion
+		if (!isRunningWhenEnd) {
+			this._maybePersistLearningsToRepoBrain(threadId).catch(e => console.error('[Void][RepoBrainFlush] Unhandled:', e));
+		}
 
 		// capture number of messages sent
 		this._metricsService.capture('Agent Loop Done', { nMessagesSent, chatMode })

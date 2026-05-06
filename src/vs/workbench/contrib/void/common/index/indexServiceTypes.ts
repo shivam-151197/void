@@ -39,6 +39,7 @@ export interface IVoidIndexMainService {
 	semanticSearch(queryEmbedding: number[], limit?: number): Promise<IndexedSymbol[]>;
 	getContextNeighborhoods(query: string, options?: { intent?: VoidIndexQueryIntent; limit?: number }): Promise<IndexedContextNeighborhood[]>;
 	searchDirectories(query: string, limit?: number): Promise<RankedDirectory[]>;
+	exportGraph(workspaceUri: string): Promise<void>;
 }
 export const IVoidIndexMainService = createDecorator<IVoidIndexMainService>('voidIndexMainService');
 

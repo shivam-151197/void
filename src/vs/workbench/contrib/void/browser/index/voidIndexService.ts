@@ -27,6 +27,20 @@ export class VoidIndexService extends Disposable implements IVoidIndexService, I
 		'venv',
 		'.venv',
 		'site-packages',
+		'docs',
+		'doc',
+		'documentation',
+		'bin',
+		'obj',
+		'target',
+		'logs',
+		'tmp',
+		'temp',
+		'public',
+		'static',
+		'assets',
+		'test-results',
+		'tests-results',
 	]);
 
 	constructor(
@@ -65,6 +79,11 @@ export class VoidIndexService extends Disposable implements IVoidIndexService, I
 		));
 		const indexedFiles = counts.reduce((sum, count) => sum + count, 0);
 		console.log(`[Void][indexWorkspace][run=${runId}] completed indexedFiles=${indexedFiles} durationMs=${Date.now() - startedAt}`);
+		
+		// Phase 1 Export Graphify JSON
+		for (const folder of folders) {
+			this._mainService.exportGraph(folder.uri.toString()).catch(e => console.error('[VoidIndexService] Failed to export graph:', e));
+		}
 	}
 
 	private async _indexFolder(folderUri: URI): Promise<number> {
@@ -72,15 +91,26 @@ export class VoidIndexService extends Disposable implements IVoidIndexService, I
 		if (!result.children) {
 			return 0;
 		}
+		
+		const children = result.children;
+		const concurrencyLimit = 8;
 		let indexedFiles = 0;
-		for (const child of result.children) {
-			if (child.isDirectory && !this._isExcluded(child.resource)) {
-				indexedFiles += await this._indexFolder(child.resource);
-			} else if (this._isIndexable(child.resource)) {
-				await this.reindexFile(child.resource);
-				indexedFiles += 1;
-			}
+
+		// Process children in chunks to avoid overwhelming IPC/CPU
+		for (let i = 0; i < children.length; i += concurrencyLimit) {
+			const chunk = children.slice(i, i + concurrencyLimit);
+			const results = await Promise.all(chunk.map(async child => {
+				if (child.isDirectory && !this._isExcluded(child.resource)) {
+					return await this._indexFolder(child.resource);
+				} else if (this._isIndexable(child.resource)) {
+					await this.reindexFile(child.resource);
+					return 1;
+				}
+				return 0;
+			}));
+			indexedFiles += results.reduce((a, b) => a + b, 0);
 		}
+		
 		return indexedFiles;
 	}
 
@@ -95,28 +125,36 @@ export class VoidIndexService extends Disposable implements IVoidIndexService, I
 	private _isExcluded(uri: URI): boolean {
 		const normalizedPath = uri.fsPath.toLowerCase().replace(/\\/g, '/');
 		const pathSegments = normalizedPath.split('/').filter(Boolean);
-		return pathSegments.some(segment => VoidIndexService._excludedPathSegments.has(segment));
+		return pathSegments.some(segment => VoidIndexService._excludedPathSegments.has(segment) || segment.startsWith('.'));
 	}
 
 	async reindexFile(uri: URI): Promise<void> {
+		const uriStr = uri.toString();
+		console.log(`[VoidIndexService] Checking file: ${uriStr}`);
 		try {
 			const stat = await this._fileService.stat(uri);
 			if (stat.size > 1024 * 1024) {
+				console.log(`[VoidIndexService] Skipping large file: ${uriStr} (${stat.size} bytes)`);
 				return;
 			}
 
 			const contentResult = await this._textFileService.read(uri);
 			const content = contentResult.value;
 			const hash = await hashAsync(content);
-			const prevIndex = await this._mainService.getFileIndex(uri.toString());
+			const prevIndex = await this._mainService.getFileIndex(uriStr);
+			
 			if (prevIndex && prevIndex.hash === hash) {
+				console.log(`[VoidIndexService] Skipping (hash match): ${uriStr}`);
 				return;
 			}
 
+			console.log(`[VoidIndexService] Parsing file: ${uriStr}`);
+			const startTime = Date.now();
 			const graph = await this._extractGraph(uri, content);
-			await this._mainService.updateFileIndex(uri.toString(), hash, graph);
+			await this._mainService.updateFileIndex(uriStr, hash, graph);
+			console.log(`[VoidIndexService] Finished indexing: ${uriStr} (${Date.now() - startTime}ms)`);
 		} catch (error) {
-			console.error(`[VoidIndexService] Failed to index file ${uri.toString()}:`, error);
+			console.error(`[VoidIndexService] Failed to index file ${uriStr}:`, error);
 		}
 	}
 
@@ -128,8 +166,10 @@ export class VoidIndexService extends Disposable implements IVoidIndexService, I
 
 		const tree = await this._treeSitterService.getTree(content, languageId);
 		if (!tree) {
+			console.error(`[VoidIndexService] Tree-sitter failed to parse file: ${uri.toString()} (language: ${languageId})`);
 			return { nodes: [], edges: [] };
 		}
+		console.log(`[VoidIndexService] Parsed AST for ${uri.toString()}: ${tree.rootNode.childCount} root children`);
 
 		const fileNodeId = `${uri.toString()}:file`;
 		const fileNode: IndexedSymbol = {

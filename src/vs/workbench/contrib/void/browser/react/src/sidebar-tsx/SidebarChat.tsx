@@ -1459,6 +1459,7 @@ const titleOfBuiltinToolName = {
 
 	'read_lint_errors': { done: `Read lint errors`, proposed: 'Read lint errors', running: loadingTitleWrapper('Reading lint errors') },
 	'search_in_file': { done: 'Searched in file', proposed: 'Search in file', running: loadingTitleWrapper('Searching in file') },
+	'recall_memory': { done: 'Recalled memory', proposed: 'Recall memory', running: loadingTitleWrapper('Recalling memory') },
 } as const satisfies Record<BuiltinToolName, { done: any, proposed: any, running: any }>
 
 
@@ -1487,9 +1488,11 @@ const getTitle = (toolMessage: Pick<ChatMessage & { role: 'tool' }, 'name' | 'ty
 	// built-in title
 	else {
 		const toolName = t.name as BuiltinToolName
-		if (t.type === 'success') return titleOfBuiltinToolName[toolName].done
-		if (t.type === 'running_now') return titleOfBuiltinToolName[toolName].running
-		return titleOfBuiltinToolName[toolName].proposed
+		const entry = titleOfBuiltinToolName[toolName]
+		if (!entry) return toolName // fallback: just show the raw tool name, never crash
+		if (t.type === 'success') return entry.done
+		if (t.type === 'running_now') return entry.running
+		return entry.proposed
 	}
 }
 

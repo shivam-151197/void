@@ -319,6 +319,10 @@ const prepareOpenAIOrAnthropicMessages = ({
 		if (idx <= 1 || idx >= messages.length - 1 - 3) {
 			multiplier *= .05
 		}
+		// P6: protect recent tool outputs — last 6 messages override the tool x10 penalty
+		if (message.role === 'tool' && idx >= messages.length - 6) {
+			multiplier = 0.05 // same protection as boundary messages
+		}
 		return base * multiplier
 	}
 
@@ -388,7 +392,7 @@ const prepareOpenAIOrAnthropicMessages = ({
 	else if (specialToolFormat === 'anthropic-style') {
 		llmChatMessages = prepareMessages_anthropic_tools(messages as SimpleLLMMessage[], supportsAnthropicReasoning)
 	}
-	else if (specialToolFormat === 'openai-style') {
+	else if (specialToolFormat === 'openai-style' || specialToolFormat === 'gemini-style') {
 		llmChatMessages = prepareMessages_openai_tools(messages as SimpleLLMMessage[])
 	}
 	const llmMessages = llmChatMessages
@@ -650,14 +654,17 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		if (summarizedContext) {
 			simpleLLMMessages.push({
 				role: 'user',
-				content: `<previous_context_summary>
-${summarizedContext.text}
-[Note: For exact code or complete tool outputs from older turns, read .void/session_memory/${threadId ? threadId : 'current'}.md]
-</previous_context_summary>`
+				content: `<previous_context_summary>\n${summarizedContext.text}\n[Note: For exact code or complete tool outputs from older turns, read .void/session_memory/${threadId ? threadId : 'current'}.md]\n</previous_context_summary>`
 			});
-			chatMessages = chatMessages.slice(summarizedContext.summarizedUntilMessageIdx + 1);
+			
+			// Only slice if the summarized index actually falls within the current array bounds.
+			// This prevents wiping out new messages when a summary is imported from a past session.
+			if (summarizedContext.summarizedUntilMessageIdx < chatMessages.length) {
+				chatMessages = chatMessages.slice(summarizedContext.summarizedUntilMessageIdx + 1);
+			}
 		}
 
+		let toolTruncRefCounter = 0;
 		for (const m of chatMessages) {
 			if (m.role === 'checkpoint') continue
 			if (m.role === 'interrupted_streaming_tool') continue
@@ -671,7 +678,9 @@ ${summarizedContext.text}
 			else if (m.role === 'tool') {
 				let content = m.content;
 				if (content.length > 3000) {
-					content = content.substring(0, 3000) + `\n\n...[Content heavily truncated for brevity. Full output has been saved to your persistent brain file .void/session_memory/${threadId ? threadId : 'current'}.md]. Use the read_file tool to view details if needed.`;
+					toolTruncRefCounter++;
+					const ref = `mem-${toolTruncRefCounter}`;
+					content = content.substring(0, 3000) + `\n\n...[Content truncated. Use the recall_memory tool with ref="${ref}" to retrieve the full output.]`;
 				}
 				simpleLLMMessages.push({
 					role: m.role,
@@ -804,19 +813,32 @@ ${summarizedContext.text}
 		const llmMessages = this._chatMessagesToSimpleMessages(chatMessages, threadId, summarizedContext)
 
 		// --- Synthetic priming turn injection ---
-		// On the very first turn (no assistant or tool messages yet), inject a synthetic user turn
-		// that repeats the critical rule enforcement just before the real user message.
-		// This exploits recency bias: the model's attention weights are highest on the last few turns.
+		// Exploits recency bias: the model's attention weights are highest on the last few turns.
+		// IMPORTANT: Only inject BEFORE a real user message. NEVER inject between tool results and
+		// assistant turns — that creates incoherent message ordering that causes models to hallucinate.
 		const isFirstTurn = !chatMessages.some(m => m.role === 'assistant' || m.role === 'tool')
 		const supportsMultiTurnInjection = (chatMode === 'agent' || chatMode === 'plan' || chatMode === 'gather')
-		if (!disableSystemMessage && isFirstTurn && supportsMultiTurnInjection && rulesBlock && llmMessages.length > 0) {
-			// Insert synthetic user turn as the second-to-last message (before the real user message)
-			const primingTurn: SimpleLLMMessage = {
-				role: 'user',
-				content: rulesBlock,
+		const lastMessage = llmMessages[llmMessages.length - 1]
+		const lastMessageIsUser = lastMessage?.role === 'user'
+		if (!disableSystemMessage && supportsMultiTurnInjection && llmMessages.length > 0 && lastMessageIsUser) {
+			if (isFirstTurn && rulesBlock) {
+				// First turn: inject full rules block as a synthetic user turn before the real user message
+				const primingTurn: SimpleLLMMessage = {
+					role: 'user',
+					content: rulesBlock,
+				}
+				llmMessages.splice(llmMessages.length - 1, 0, primingTurn)
+				console.log(`[Void][prepareLLMChatMessages] injected full priming turn (rulesBlock chars=${rulesBlock.length})`);
+			} else if (!isFirstTurn) {
+				// Subsequent turns: inject a condensed critical reminder BEFORE the real user message.
+				// Only safe because we verified the last message is a user message above.
+				const condensedReminder: SimpleLLMMessage = {
+					role: 'user',
+					content: `[SYSTEM REMINDER] Tool parameter rules — command: single plain string (e.g. "git status"), NEVER an array or object. uri: clean absolute path (e.g. "/home/user/file.js"), NEVER contains XML tags. All parameter values must be plain strings. One tool call per response.`,
+				}
+				llmMessages.splice(llmMessages.length - 1, 0, condensedReminder)
+				console.log(`[Void][prepareLLMChatMessages] injected condensed reminder turn (iteration >1)`);
 			}
-			llmMessages.splice(llmMessages.length - 1, 0, primingTurn)
-			console.log(`[Void][prepareLLMChatMessages] injected synthetic priming turn (rulesBlock chars=${rulesBlock.length})`);
 		}
 
 		const { messages, separateSystemMessage } = prepareMessages({

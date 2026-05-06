@@ -17,14 +17,15 @@ export class IndexChannel implements IServerChannel {
 
 	async call(_: unknown, command: string, params: any): Promise<any> {
 		switch (command) {
-			case 'updateFileIndex': return this.service.updateFileIndex(params.uri, params.hash, params.graph);
-			case 'getFileIndex': return this.service.getFileIndex(params.uri);
-			case 'getSymbols': return this.service.getSymbols(params.uri);
-			case 'searchSymbols': return this.service.searchSymbols(params.query);
-			case 'searchCallers': return this.service.searchCallers(params.query);
-			case 'getContextNeighborhoods': return this.service.getContextNeighborhoods(params.query, params.options);
-			case 'semanticSearch': return this.service.semanticSearch(params.queryEmbedding, params.limit);
-			case 'searchDirectories': return this.service.searchDirectories(params.query, params.limit);
+			case 'updateFileIndex': return this.service.updateFileIndex(params[0], params[1], params[2]);
+			case 'getFileIndex': return this.service.getFileIndex(params[0]);
+			case 'getSymbols': return this.service.getSymbols(params[0]);
+			case 'searchSymbols': return this.service.searchSymbols(params[0]);
+			case 'searchCallers': return this.service.searchCallers(params[0]);
+			case 'getContextNeighborhoods': return this.service.getContextNeighborhoods(params[0], params[1]);
+			case 'semanticSearch': return this.service.semanticSearch(params[0], params[1]);
+			case 'searchDirectories': return this.service.searchDirectories(params[0], params[1]);
+			case 'exportGraph': return this.service.exportGraph(params[0]);
 		}
 
 		throw new Error(`Invalid command: ${command}`);

@@ -42,6 +42,20 @@ const validateStr = (argName: string, value: unknown) => {
 	return value
 }
 
+const validateStrOrArray = (argName: string, value: unknown) => {
+	if (value === null) throw new Error(`Invalid LLM output: ${argName} was null.`)
+	if (Array.isArray(value)) {
+		const strArr = value.map(v => String(v))
+		const hasSpace = strArr.some(v => v.includes(' '))
+		return strArr.join(hasSpace ? ' && ' : ' ')
+	}
+	if (typeof value === 'object' && value !== null && 'command' in value && typeof (value as any).command === 'string') {
+		return (value as any).command
+	}
+	if (typeof value !== 'string') throw new Error(`Invalid LLM output format: ${argName} must be a string (or array of strings), but its type is "${typeof value}". Full value: ${JSON.stringify(value)}.`)
+	return value
+}
+
 const sanitizeSearchCodebaseField = (value: unknown) => {
 	if (typeof value !== 'string') return ''
 	return value
@@ -169,6 +183,8 @@ export interface IToolsService {
 	validateParams: ValidateBuiltinParams;
 	callTool: CallBuiltinTool;
 	stringOfResult: BuiltinToolResultToString;
+	/** Set by chatThreadService to provide session-memory recall. */
+	setRecallMemoryFn(fn: (ref: string) => Promise<string | null>): void;
 }
 
 export const IToolsService = createDecorator<IToolsService>('ToolsService');
@@ -180,6 +196,12 @@ export class ToolsService implements IToolsService {
 	public validateParams: ValidateBuiltinParams;
 	public callTool: CallBuiltinTool;
 	public stringOfResult: BuiltinToolResultToString;
+	/** Injected by chatThreadService so recall_memory can look up session memory */
+	private _recallMemoryFn: ((ref: string) => Promise<string | null>) | undefined;
+
+	setRecallMemoryFn(fn: (ref: string) => Promise<string | null>): void {
+		this._recallMemoryFn = fn;
+	}
 
 	constructor(
 		@IFileService fileService: IFileService,
@@ -224,6 +246,10 @@ export class ToolsService implements IToolsService {
 				const { uri: uriStr, } = params
 				const uri = validateURI(uriStr)
 				return { uri }
+			},
+			read_symbol: (params: RawToolParamsObj) => {
+				const query = typeof params.query === 'string' ? params.query : ''
+				return { query }
 			},
 			search_pathnames_only: (params: RawToolParamsObj) => {
 				const {
@@ -310,14 +336,14 @@ export class ToolsService implements IToolsService {
 
 			run_command: (params: RawToolParamsObj) => {
 				const { command: commandUnknown, cwd: cwdUnknown } = params
-				const command = validateStr('command', commandUnknown)
+				const command = validateStrOrArray('command', commandUnknown)
 				const cwd = validateOptionalStr('cwd', cwdUnknown)
 				const terminalId = generateUuid()
 				return { command, cwd, terminalId }
 			},
 			run_persistent_command: (params: RawToolParamsObj) => {
 				const { command: commandUnknown, persistent_terminal_id: persistentTerminalIdUnknown } = params;
-				const command = validateStr('command', commandUnknown);
+				const command = validateStrOrArray('command', commandUnknown);
 				const persistentTerminalId = validateProposedTerminalId(persistentTerminalIdUnknown)
 				return { command, persistentTerminalId };
 			},
@@ -358,7 +384,11 @@ export class ToolsService implements IToolsService {
 				}
 				return { query, searchType: searchType as BuiltinToolCallParams['search_codebase']['searchType'] }
 			},
-
+			recall_memory: (params: RawToolParamsObj) => {
+				const { ref: refUnknown } = params
+				const ref = validateStr('ref', refUnknown)
+				return { ref }
+			},
 		}
 
 
@@ -482,6 +512,10 @@ export class ToolsService implements IToolsService {
 			},
 
 			rewrite_file: async ({ uri, newContent }) => {
+				const exists = await fileService.exists(uri)
+				if (!exists) {
+					await fileService.createFile(uri)
+				}
 				await voidModelService.initializeModel(uri)
 				if (this.commandBarService.getStreamState(uri) === 'streaming') {
 					throw new Error(`Another LLM is currently making changes to this file. Please stop streaming for now and ask the user to resume later.`)
@@ -561,6 +595,18 @@ export class ToolsService implements IToolsService {
 					result: summarizeSearchCodebaseResultForLog(result),
 				}, null, 2)}`)
 				return { result }
+			},
+			read_symbol: async ({ query }) => {
+				const symbols = await this.voidIndexService.searchSymbols(query)
+				return { result: { symbols } }
+			},
+			recall_memory: async ({ ref }) => {
+				if (!ref || typeof ref !== 'string') {
+					return { result: { content: `ERROR: recall_memory requires a valid ref string (e.g. "mem-1"). Do NOT call recall_memory again without a valid ref from a truncation notice. Use read_file or run_command instead.` } }
+				}
+				// Delegate to the injected recall helper set by chatThreadService
+				const content = await this._recallMemoryFn?.(ref) ?? `No memory found for ref "${ref}". This ref does not exist in the session index. Do NOT retry recall_memory with the same or similar ref — it will not be found. Switch to using read_file or run_command to retrieve the information you need.`
+				return { result: { content } }
 			},
 		}
 
@@ -682,6 +728,15 @@ export class ToolsService implements IToolsService {
 					.join('\n\n')
 
 				return `${header}\n\n${renderedFiles}\n\n${grounding_rules}\n\nSuggested next: ${suggested_next}`
+			},
+			recall_memory: (_params, result) => {
+				return result.content
+			},
+			read_symbol: (_params, result) => {
+				if (result.symbols.length === 0) return 'No symbols found matching the query.'
+				return result.symbols
+					.map(s => `Symbol: ${s.name} (${s.type})\nFile: ${s.uri.fsPath}\nRange: ${s.range.startLine}-${s.range.endLine}\nContent:\n${tripleTick[0]}\n${s.text}\n${tripleTick[1]}`)
+					.join('\n\n')
 			},
 		}
 

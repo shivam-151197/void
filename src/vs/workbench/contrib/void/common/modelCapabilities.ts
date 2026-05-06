@@ -456,6 +456,7 @@ const extensiveModelOptionsFallback: VoidStaticProviderInfo['modelOptionsFallbac
 
 	if (lower.includes('quasar') || lower.includes('quaser')) return toFallback(openSourceModelOptions_assumingOAICompat, 'quasar')
 
+	if (lower.includes('codex') && lower.includes('5.3')) return toFallback(openAIModelOptions, 'gpt-5.3-codex')
 	if (lower.includes('gpt') && (lower.includes('5.3') || lower.includes('5-3') || lower.includes('5.4') || lower.includes('5-4'))) return toFallback(openAIModelOptions, 'gpt-4.1')
 	if (lower.includes('gpt') && lower.includes('5')) return toFallback(openAIModelOptions, 'gpt-4.1')
 
@@ -631,6 +632,26 @@ const openAIModelOptions = { // https://platform.openai.com/docs/pricing
 		specialToolFormat: 'openai-style',
 		supportsSystemMessage: 'developer-role',
 		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: false, canIOReasoning: false, reasoningSlider: { type: 'effort_slider', values: ['low', 'medium', 'high'], default: 'low' } },
+	},
+	'gpt-5.3-codex': {
+		contextWindow: 128_000,
+		reservedOutputTokenSpace: 8_192,
+		cost: { input: 0, output: 0 },
+		downloadable: false,
+		supportsFIM: false,
+		specialToolFormat: undefined,
+		supportsSystemMessage: 'system-role',
+		reasoningCapabilities: false,
+	},
+	'codex-5.3': {
+		contextWindow: 128_000,
+		reservedOutputTokenSpace: 8_192,
+		cost: { input: 0, output: 0 },
+		downloadable: false,
+		supportsFIM: false,
+		specialToolFormat: undefined,
+		supportsSystemMessage: 'system-role',
+		reasoningCapabilities: false,
 	},
 	'gpt-4.1': {
 		contextWindow: 1_047_576,

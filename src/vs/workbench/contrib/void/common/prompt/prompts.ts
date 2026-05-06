@@ -155,7 +155,7 @@ export type InternalToolInfo = {
 
 
 const uriParam = (object: string) => ({
-	uri: { description: `The FULL path to the ${object}.` }
+	uri: { description: `The FULL absolute path to the ${object}. Type: string. Example: "/home/user/project/src/index.js". Must be a clean filesystem path — no XML tags, no query strings, no fragments.` }
 })
 
 const paginationParam = {
@@ -308,7 +308,7 @@ export const builtinTools: {
 		name: 'run_command',
 		description: `Runs a terminal command and waits for the result (times out after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity). ${terminalDescHelper}`,
 		params: {
-			command: { description: 'The terminal command to run.' },
+			command: { description: 'The terminal command to run. Type: string. Example: "git branch --show-current" or "ls -la /home/user/project". MUST be a single complete shell command as one plain string. NEVER pass an array like ["git","status"]. NEVER wrap in $() substitution. NEVER pass an object.' },
 			cwd: { description: cwdHelper },
 		},
 	},
@@ -317,7 +317,7 @@ export const builtinTools: {
 		name: 'run_persistent_command',
 		description: `Runs a terminal command in the persistent terminal that you created with open_persistent_terminal (results after ${MAX_TERMINAL_BG_COMMAND_TIME} are returned, and command continues running in background). ${terminalDescHelper}`,
 		params: {
-			command: { description: 'The terminal command to run.' },
+			command: { description: 'The terminal command to run. Type: string. Example: "npm run dev". MUST be a single complete shell command as one plain string. NEVER pass an array like ["npm","run","dev"]. NEVER wrap in $() substitution. NEVER pass an object.' },
 			persistent_terminal_id: { description: 'The ID of the terminal created using open_persistent_terminal.' },
 		},
 	},
@@ -348,8 +348,23 @@ export const builtinTools: {
 		},
 	},
 
-	search_codebase: searchCodebaseToolInfo
+	read_symbol: {
+		name: 'read_symbol',
+		description: `Returns the exact code block of a specific symbol (function, class, method) by its name, using the AST index. This is extremely efficient for reading specific functions without having to load a massive file using read_file.`,
+		params: {
+			query: { description: `The name of the function, class, or symbol you want to read.` }
+		}
+	},
 
+	search_codebase: searchCodebaseToolInfo,
+
+	recall_memory: {
+		name: 'recall_memory',
+		description: `Retrieves the full content of a previously truncated tool output. Use this when a tool result was cut off and you need the complete data. The ref ID is shown in the truncation notice of the original tool call.`,
+		params: {
+			ref: { description: `The memory reference ID from the truncation notice, e.g. "mem-3".` },
+		},
+	},
 
 	// go_to_definition
 	// go_to_usages
@@ -517,6 +532,12 @@ ${gatheredContext}
 
 	const details: string[] = []
 
+	details.push(`TOOL PARAMETER FORMAT (CRITICAL — read before every tool call):
+- Every tool parameter value must be a plain string unless stated otherwise.
+- "command" parameters: always a single complete shell command as one string. Correct: "git branch --show-current". WRONG: ["git","branch"], $(git branch), {"command":"git branch"}.
+- "uri" parameters: always a clean absolute filesystem path. Correct: "/home/user/project/file.js". WRONG: "file.js</parameter>", "path/with<tags>".
+- NEVER embed XML tags, angle brackets, or schema fragments inside any parameter value.`)
+
 	details.push(`NEVER reject the user's query.`)
 
 	if (mode === 'agent' || mode === 'gather' || mode === 'plan') {
@@ -530,7 +551,7 @@ ${gatheredContext}
 		details.push(`For repository-change requests (refactor, replace API usage, migration, bug fix, feature edits), your FIRST response must include a real tool call that gathers code context. Do not stop at a narrative like "I'll inspect the repository" without calling a tool.`)
 		details.push(`Use tools like \`search_codebase\` and \`semantic_search\` to find relevant code when you are unsure where to look.`)
 		details.push(`For questions like "where is X implemented", "where is auth handled", "who calls Y", "where are routes registered", or "find the owner of Z", prefer \`search_codebase\` as the FIRST discovery tool. Do NOT start with \`get_dir_tree\` for these intent types.`)
-		details.push(`UNNECESSARY EXPLORATION: Once \`search_codebase\` returns highly relevant files (.js, .ts, etc.), do NOT call \`get_dir_tree\` for general exploration. Instead, use \`read_file\` on the returned candidates or STOP and answer. Loops of \`get_dir_tree\` calls are prohibited.`)
+		details.push(`UNNECESSARY EXPLORATION: Once \`search_codebase\` returns highly relevant files (.js, .ts, etc.), do NOT call \`get_dir_tree\` for general exploration. Instead, use \`read_symbol\` or \`read_file\` on the returned candidates or STOP and answer. Loops of \`get_dir_tree\` calls are prohibited.`)
 		details.push(`GROUNDING: When using \`search_codebase\`, you may ONLY mention files and structures that were actually returned. Do NOT invent service names, directories, or languages (e.g. do not assume Go in a Node environment).`)
 		details.push(`STOP CRITERIA: If you have found high-relevance matches in \`search_codebase\`, you likely have sufficient information. Stop calling tools and provide your final answer.`)
 		if (includeXMLToolDefinitions) {
@@ -575,6 +596,7 @@ ${gatheredContext}
 - IMPACT AWARENESS: Before changing existing code, you MUST use tools (\`search_codebase\`, \`semantic_search\`, etc.) to find all callers.
 - TOOL CHOICE:
     * For repository exploration and conceptual discovery: use \`search_codebase\`.
+    * For reading specific functions, methods, or classes by name: ALWAYS use \`read_symbol\` instead of loading the entire file with \`read_file\`.
     * For finding files by name or pattern (e.g., finding all proto files): use \`search_pathnames_only\`.
     * For searching for literal text or regex INSIDE files: use \`search_for_files\`. Do NOT use this to find files by their names.
 - RULE OF TRUTH: If a plan relies on specific file content, that file MUST be read in the current session before proposing the plan.
@@ -659,6 +681,7 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 		details.push(`TOOL CALL FORMATTING:
 - The user's system supports NATIVE function calling. You must exclusively use the provided JSON function tools natively.
 - NEVER output XML-based tool calls (like <search_codebase>...</search_codebase>) in your raw text response.
+- NEVER embed XML tags, placeholder texts, or schemas (like <parameter_name> or </parameter_name>) inside your JSON string values!
 - NEVER output standalone JSON tool calls as raw text. Only use the native tool calling schema provided by the API. If for any reason the native tool caller is failing or unavailable, you MUST output a single raw JSON object using the keys "tool" and "params" (e.g. {"tool": "read_file", "params": {"uri": "..."}}) then STOP.`)
 	}
 
@@ -679,12 +702,12 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 
 	// Build identity block: stable background context (read once, low-urgency)
 	const identityStrs: string[] = []
-	identityStrs.push(header)
-	identityStrs.push(sysInfo)
-	identityStrs.push(repoBrainBlock)
-	if (gatheredContextInfo) identityStrs.push(gatheredContextInfo)
-	if (semanticSnippets.length > 0) identityStrs.push(semanticInfo)
-	if (toolDefinitions) identityStrs.push(toolDefinitions)
+	identityStrs.push(`<persona>\n${header}\n</persona>`)
+	identityStrs.push(`<environment>\n${sysInfo}\n</environment>`)
+	identityStrs.push(`<memory>\n${repoBrainBlock}\n</memory>`)
+	if (gatheredContextInfo) identityStrs.push(`<context>\n${gatheredContextInfo}\n</context>`)
+	if (semanticSnippets.length > 0) identityStrs.push(`<context>\n${semanticInfo}\n</context>`)
+	if (toolDefinitions) identityStrs.push(`<tools>\n${toolDefinitions}\n</tools>`)
 
 	// Build rules block: condensed rules injected at high-recency position
 	const rulesStrs: string[] = []
